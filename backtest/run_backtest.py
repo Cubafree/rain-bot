@@ -73,17 +73,19 @@ async def run_backtest(
         "skip_parse": 0, "skip_forecast": 0, "skip_price": 0, "skip_resolved": 0,
     }
 
+    # Log the first few questions so we can see what the parser is receiving
+    for i, gm in enumerate(resolved_markets[:3]):
+        logger.info(f"Sample market[{i}] question: {gm.question[:120]!r}  clobTokenIds={gm.clobTokenIds!r}")
+
     for gm in resolved_markets:
         parsed = parse_market(gm.question)
         if parsed.parse_confidence < 0.8 or parsed.station is None:
             results["skip_parse"] += 1
-            logger.debug(
-                "Skip: parse failed",
-                q=gm.question[:80],
-                conf=parsed.parse_confidence,
-                city=parsed.city,
-                station=parsed.station,
-            )
+            if results["skip_parse"] <= 5:
+                logger.warning(
+                    f"Skip parse: conf={parsed.parse_confidence:.2f} city={parsed.city!r} "
+                    f"station={parsed.station!r} q={gm.question[:80]!r}"
+                )
             continue
         if parsed.target_date is None or parsed.latitude is None:
             results["skip_parse"] += 1
@@ -107,15 +109,13 @@ async def run_backtest(
 
         # Fetch historical CLOB price at signal time (24h before market close).
         # gm.yes_price is the final resolved price (0 or 1) — not useful for entry.
-        logger.debug(
-            "CLOB lookup",
-            market_id=gm.id,
-            clobTokenIds=gm.clobTokenIds,
-            conditionId=gm.conditionId,
-            endDateIso=str(gm.endDateIso),
-        )
         signal_price = await _get_signal_price(gm)
         if signal_price is None:
+            if results["skip_price"] == 0:
+                logger.warning(
+                    f"First skip_price: clobTokenIds={gm.clobTokenIds!r} "
+                    f"conditionId={gm.conditionId!r} endDateIso={gm.endDateIso!r}"
+                )
             results["skip_price"] += 1
             continue
 
@@ -245,17 +245,10 @@ async def run_backtest(
     win_rate = results["wins"] / total if total > 0 else 0.0
 
     logger.info(
-        "Backtest complete",
-        total_bets=total,
-        wins=results["wins"],
-        losses=results["losses"],
-        win_rate=f"{win_rate:.1%}",
-        total_pnl=f"${results['total_pnl']:.2f}",
-        skip_parse=results["skip_parse"],
-        skip_forecast=results["skip_forecast"],
-        skip_price=results["skip_price"],
-        skip_resolved=results["skip_resolved"],
-        llm_calls=llm_calls,
+        f"Backtest complete — bets={total} wins={results['wins']} losses={results['losses']} "
+        f"pnl=${results['total_pnl']:.2f} win_rate={win_rate:.1%} llm_calls={llm_calls} | "
+        f"skips: parse={results['skip_parse']} forecast={results['skip_forecast']} "
+        f"price={results['skip_price']} resolved={results['skip_resolved']}"
     )
 
 
