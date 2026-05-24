@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import Integer, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from config import settings
 from db.models import Bet, CycleLog, DailyStats, Market, Signal, Strategy
@@ -208,6 +209,7 @@ async def backtest_page(request: Request, _: Auth, db: DB):
             .where(Bet.mode == "backtest")
             .order_by(desc(Bet.placed_at))
             .limit(200)
+            .options(selectinload(Bet.signal))
         )
     ).all()
 
