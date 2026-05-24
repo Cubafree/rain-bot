@@ -1,9 +1,10 @@
 """FastAPI routes for the web dashboard."""
+import asyncio
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, Form, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import Integer, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +16,26 @@ from web.auth import require_auth
 
 router = APIRouter()
 templates = Jinja2Templates(directory="web/templates")
+
+_backtest_state: dict = {
+    "running": False,
+    "started_at": None,
+    "params": None,
+    "error": None,
+    "finished_at": None,
+}
+
+
+async def _run_backtest_task(days: int, strategy_codes: list[str] | None, dry_run: bool, max_llm_calls: int) -> None:
+    from backtest.run_backtest import run_backtest
+    _backtest_state["error"] = None
+    try:
+        await run_backtest(days=days, strategy_codes=strategy_codes, dry_run=dry_run, max_llm_calls=max_llm_calls)
+    except Exception as exc:
+        _backtest_state["error"] = str(exc)
+    finally:
+        _backtest_state["running"] = False
+        _backtest_state["finished_at"] = datetime.now(timezone.utc).isoformat()
 
 Auth = Annotated[str, Depends(require_auth)]
 DB = Annotated[AsyncSession, Depends(get_db)]
@@ -145,6 +166,30 @@ async def analytics(request: Request, _: Auth, db: DB):
         "daily_stats": daily_stats,
         "mode": mode,
     })
+
+
+@router.post("/api/backtest/run")
+async def backtest_run(
+    _: Auth,
+    days: Annotated[int, Form()] = 90,
+    dry_run: Annotated[str | None, Form()] = None,
+    max_llm_calls: Annotated[int, Form()] = 200,
+    strategies: Annotated[list[str] | None, Form()] = None,
+):
+    is_dry_run = dry_run is not None
+    if _backtest_state["running"]:
+        return JSONResponse({"error": "already running"}, status_code=409)
+    _backtest_state["running"] = True
+    _backtest_state["started_at"] = datetime.now(timezone.utc).isoformat()
+    _backtest_state["params"] = {"days": days, "dry_run": is_dry_run, "max_llm_calls": max_llm_calls, "strategies": strategies}
+    _backtest_state["finished_at"] = None
+    asyncio.create_task(_run_backtest_task(days, strategies or None, is_dry_run, max_llm_calls))
+    return JSONResponse({"status": "started"})
+
+
+@router.get("/api/backtest/status")
+async def backtest_status(_: Auth):
+    return JSONResponse(_backtest_state)
 
 
 @router.get("/backtest", response_class=HTMLResponse)

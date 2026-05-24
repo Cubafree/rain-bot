@@ -6,16 +6,109 @@
 
 <div class="bg-white rounded-lg border p-5 mb-8">
   <h2 class="font-semibold text-sm mb-4">Run Backtest</h2>
-  <p class="text-sm text-gray-500 mb-4">
-    Executes the strategy analyzer against historical resolved markets using archived GFS forecast data.
-    Run from the terminal: <code class="bg-gray-100 px-1 rounded">python backtest/run_backtest.py --days 90</code>
-  </p>
-  <div class="flex gap-3 flex-wrap">
-    {% for s in strategies %}
-    <span class="px-3 py-1 rounded border text-sm font-mono">{{ s.code }} {{ s.name }}</span>
-    {% endfor %}
-  </div>
+
+  <div id="bt-status" class="hidden mb-4 px-3 py-2 rounded text-sm font-medium"></div>
+
+  <form id="bt-form" class="space-y-4">
+    <div class="flex flex-wrap gap-6 items-end">
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">Days of history</label>
+        <input type="number" name="days" value="90" min="7" max="365"
+          class="border rounded px-3 py-1.5 text-sm w-28 focus:outline-none focus:ring-1 focus:ring-blue-400">
+      </div>
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">Max LLM calls</label>
+        <input type="number" name="max_llm_calls" value="200" min="1" max="2000"
+          class="border rounded px-3 py-1.5 text-sm w-28 focus:outline-none focus:ring-1 focus:ring-blue-400">
+      </div>
+      <label class="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="checkbox" name="dry_run" class="rounded">
+        <span>Dry run (no LLM)</span>
+      </label>
+    </div>
+
+    <div>
+      <p class="text-xs text-gray-500 mb-2">Strategies (leave unchecked = all active)</p>
+      <div class="flex gap-3 flex-wrap">
+        {% for s in strategies %}
+        <label class="flex items-center gap-1.5 cursor-pointer border rounded px-3 py-1">
+          <input type="checkbox" name="strategies" value="{{ s.code }}" class="rounded">
+          <span class="text-sm font-mono">{{ s.code }}</span>
+          <span class="text-xs text-gray-500">{{ s.name }}</span>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+
+    <button type="submit" id="bt-btn"
+      class="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
+      Run Backtest
+    </button>
+  </form>
 </div>
+
+<script>
+(function () {
+  const form = document.getElementById('bt-form');
+  const btn = document.getElementById('bt-btn');
+  const statusEl = document.getElementById('bt-status');
+  let poll;
+
+  function showStatus(msg, color) {
+    statusEl.className = 'mb-4 px-3 py-2 rounded text-sm font-medium ' + color;
+    statusEl.textContent = msg;
+  }
+
+  function startPoll() {
+    poll = setInterval(async () => {
+      const r = await fetch('/api/backtest/status');
+      const s = await r.json();
+      if (s.running) {
+        showStatus('Running… started ' + new Date(s.started_at).toLocaleTimeString(), 'bg-yellow-100 text-yellow-800');
+      } else {
+        clearInterval(poll);
+        btn.disabled = false;
+        if (s.error) {
+          showStatus('Error: ' + s.error, 'bg-red-100 text-red-700');
+        } else if (s.finished_at) {
+          showStatus('Completed at ' + new Date(s.finished_at).toLocaleTimeString() + ' — refresh to see results', 'bg-green-100 text-green-700');
+        }
+      }
+    }, 3000);
+  }
+
+  async function checkOnLoad() {
+    const r = await fetch('/api/backtest/status');
+    const s = await r.json();
+    if (s.running) {
+      btn.disabled = true;
+      showStatus('Running… started ' + new Date(s.started_at).toLocaleTimeString(), 'bg-yellow-100 text-yellow-800');
+      startPoll();
+    }
+  }
+  checkOnLoad();
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    btn.disabled = true;
+    const fd = new FormData(form);
+    const r = await fetch('/api/backtest/run', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (r.status === 409) {
+      showStatus('Already running', 'bg-yellow-100 text-yellow-800');
+      btn.disabled = false;
+      return;
+    }
+    if (!r.ok) {
+      showStatus('Error: ' + (data.error || r.statusText), 'bg-red-100 text-red-700');
+      btn.disabled = false;
+      return;
+    }
+    showStatus('Started…', 'bg-yellow-100 text-yellow-800');
+    startPoll();
+  });
+})();
+</script>
 
 {% if bets %}
 <div class="bg-white rounded-lg border overflow-x-auto">
