@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import desc, func, select
+from sqlalchemy import Integer, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -124,7 +124,7 @@ async def analytics(request: Request, _: Auth, db: DB):
                 Strategy.code,
                 Strategy.name,
                 func.count(Bet.id).label("total"),
-                func.sum((Bet.outcome == "win").cast(int)).label("wins"),
+                func.sum((Bet.outcome == "win").cast(Integer)).label("wins"),
                 func.sum(Bet.pnl).label("total_pnl"),
             )
             .join(Bet, Strategy.id == Bet.strategy_id)
