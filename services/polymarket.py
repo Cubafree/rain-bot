@@ -160,11 +160,15 @@ async def get_resolved_markets(category: str = "weather", days: int = 180) -> li
                     pass
 
                 tags = event.get("tags", [])
+                event_title = event.get("title", "")
                 for mkt in event.get("markets", []):
                     item = dict(mkt)
                     # inject event-level fields the nested market lacks
                     item.setdefault("tags", tags)
                     item["endDateIso"] = mkt.get("endDate") or event.get("endDate")
+                    # combine event title (has city+date) with market question (has threshold)
+                    mkt_q = mkt.get("question", "")
+                    item["question"] = f"{event_title} {mkt_q}".strip() if event_title else mkt_q
                     try:
                         markets.append(GammaMarket.model_validate(item))
                     except Exception:
