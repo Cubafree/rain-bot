@@ -122,6 +122,8 @@ async def run_backtest(
                     station=parsed.station,
                 )
                 llm_calls += 1
+                # ~30 req/min — stays well within OpenRouter rate limits
+                await asyncio.sleep(2.0)
 
             if signal_result.signal is None or signal_result.signal.direction is None:
                 continue

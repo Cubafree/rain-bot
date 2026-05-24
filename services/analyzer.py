@@ -9,7 +9,7 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, field_validator
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential_jitter,
     before_sleep_log,
@@ -22,7 +22,8 @@ from services.weather import WeatherSummary
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 _log = logging.getLogger(__name__)
-_sem = asyncio.Semaphore(10)
+# Conservative concurrency — OpenRouter free/starter tiers cap around 20 req/min
+_sem = asyncio.Semaphore(3)
 
 WEATHER_ANALYSIS_PROMPT = """You are a prediction markets analyst specializing in weather events.
 
@@ -84,10 +85,18 @@ class AnalysisResult(BaseModel):
     raw_response: str | None = None
 
 
+def _is_retryable_llm(exc: BaseException) -> bool:
+    if isinstance(exc, (httpx.TransportError, httpx.TimeoutException)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+        return True
+    return False
+
+
 @retry(
-    retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException)),
-    stop=stop_after_attempt(3),
-    wait=wait_exponential_jitter(initial=2, max=60, jitter=3),
+    retry=retry_if_exception(_is_retryable_llm),
+    stop=stop_after_attempt(5),
+    wait=wait_exponential_jitter(initial=10, max=120, jitter=5),
     before_sleep=before_sleep_log(_log, logging.WARNING),
     reraise=True,
 )
@@ -108,8 +117,8 @@ async def _call_llm(client: httpx.AsyncClient, prompt: str, model: str) -> dict:
         timeout=45,
     )
     if resp.status_code == 429:
-        logger.warning("OpenRouter rate limited")
-        raise httpx.TimeoutException("rate limited")
+        logger.warning("OpenRouter rate limited — will retry with backoff")
+        raise httpx.HTTPStatusError("429", request=resp.request, response=resp)
     resp.raise_for_status()
     return resp.json()
 
