@@ -266,22 +266,24 @@ async def get_yes_token_id(condition_id: str) -> str | None:
 async def get_price_at_time(
     token_id: str,
     timestamp: datetime,
-    interval: str = "1h",
 ) -> float | None:
-    """Fetch historical YES price closest to a given timestamp.
+    """Fetch the last traded YES price at or before a given timestamp.
 
-    token_id must be the CLOB token ID (numeric string from clobTokenIds[0]),
-    NOT the hex conditionId — the CLOB /prices-history endpoint uses token IDs.
+    Uses startTs/endTs with fidelity=60 (1-min candles). Returns the price of
+    the last entry in the window, i.e. the most-recent price before timestamp.
+    token_id must be the CLOB numeric token ID, NOT a hex conditionId.
     """
+    end_ts = int(timestamp.timestamp())
+    start_ts = end_ts - 7200  # look back 2 hours to find last traded price
     async with httpx.AsyncClient() as client:
         try:
             data = await _get(
                 client,
                 f"{CLOB_BASE}/prices-history",
                 market=token_id,
-                interval=interval,
-                startTs=int(timestamp.timestamp()),
-                endTs=int(timestamp.timestamp()) + 3600,
+                startTs=start_ts,
+                endTs=end_ts,
+                fidelity=60,
             )
         except Exception as e:
             logger.warning("Failed to fetch price history", error=str(e), token_id=token_id)
@@ -291,4 +293,4 @@ async def get_price_at_time(
     if not history:
         return None
 
-    return float(history[0].get("p", 0.5))
+    return float(history[-1].get("p", 0.5))
