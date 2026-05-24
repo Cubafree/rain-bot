@@ -112,9 +112,9 @@ async def _call_llm(client: httpx.AsyncClient, prompt: str, model: str) -> dict:
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.1,
-            "max_tokens": 400,
+            "max_tokens": 2000,
         },
-        timeout=45,
+        timeout=90,
     )
     if resp.status_code == 429:
         logger.warning("OpenRouter rate limited — will retry with backoff")

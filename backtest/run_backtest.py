@@ -318,19 +318,25 @@ async def _get_signal_price(gm) -> tuple[float, float] | tuple[None, None]:
             return None, None
 
     # Try progressively shorter lead times — most markets open <24h before close
+    # Cache sentinel ("MISS") for zero-volume tokens to avoid repeated HTTP calls on reruns
+    _MISS = "MISS"
     for hours_back in (24, 12, 6, 2):
         signal_time = gm.endDateIso - timedelta(hours=hours_back)
         cache_key = f"clob:{yes_token_id}:{signal_time.strftime('%Y%m%d%H')}"
-        price = CACHE.get(cache_key)
-        if price is None:
-            price = await polymarket.get_price_at_time(
-                token_id=yes_token_id,
-                timestamp=signal_time,
-            )
-            if price is not None:
-                CACHE.set(cache_key, price, expire=86400 * 30)
+        cached = CACHE.get(cache_key)
+        if cached == _MISS:
+            continue
+        if cached is not None:
+            return cached, float(hours_back)
+        price = await polymarket.get_price_at_time(
+            token_id=yes_token_id,
+            timestamp=signal_time,
+        )
         if price is not None:
+            CACHE.set(cache_key, price, expire=86400 * 30)
             return price, float(hours_back)
+        # Cache the miss so we skip this slot on the next run
+        CACHE.set(cache_key, _MISS, expire=86400 * 7)
 
     return None, None
 
