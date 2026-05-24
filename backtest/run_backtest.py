@@ -94,17 +94,27 @@ async def run_backtest(
             results["skipped"] += 1
             continue
 
+        # Fetch historical CLOB price at signal time (24h before market close).
+        # gm.yes_price is the final resolved price (0 or 1) — not useful for entry.
+        signal_price = await _get_signal_price(gm)
+        if signal_price is None:
+            logger.debug(
+                "Skipping market — no historical price available",
+                market_id=gm.id,
+                question=gm.question[:60],
+            )
+            results["skipped"] += 1
+            continue
+
+        # Skip prices too close to 0/1 — 0 causes division by zero, 1 gives 0 edge
+        if signal_price <= 0.01 or signal_price >= 0.99:
+            results["skipped"] += 1
+            continue
+
         for strategy in strategies:
             if not dry_run and llm_calls >= max_llm_calls:
                 logger.warning("LLM call limit reached, stopping")
                 break
-
-            # Approximate market price at signal time (24h before close)
-            signal_price = gm.yes_price
-
-            # Skip fully-resolved prices — 0.0 causes division by zero, 1.0 gives 0 edge
-            if signal_price <= 0.01 or signal_price >= 0.99:
-                continue
 
             if dry_run:
                 import random
@@ -259,6 +269,45 @@ async def _get_cached_forecast(
     if result is not None:
         CACHE.set(key, result, expire=86400 * 30)
     return result
+
+
+async def _get_signal_price(gm) -> float | None:
+    """Return the historical YES price 24h before market close.
+
+    Uses the CLOB prices-history endpoint keyed by conditionId.  Falls back
+    gracefully (returns None) when:
+    - conditionId is missing on the market object
+    - endDateIso is None (can't compute signal time)
+    - CLOB returns no data for that timestamp window
+
+    Results are cached in the shared diskcache CACHE instance to avoid
+    redundant network calls on re-runs.
+    """
+    if gm.conditionId is None:
+        logger.debug("No conditionId, skipping CLOB lookup", market_id=gm.id)
+        return None
+
+    if gm.endDateIso is None:
+        logger.debug("No endDateIso, skipping CLOB lookup", market_id=gm.id)
+        return None
+
+    # Signal time: 24h before market close
+    signal_time = gm.endDateIso - timedelta(hours=24)
+
+    cache_key = f"clob:{gm.conditionId}:{signal_time.strftime('%Y%m%d%H')}"
+    cached = CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    price = await polymarket.get_price_at_time(
+        condition_id=gm.conditionId,
+        timestamp=signal_time,
+    )
+
+    if price is not None:
+        CACHE.set(cache_key, price, expire=86400 * 30)
+
+    return price
 
 
 def _fake_signal(market_price: float):
