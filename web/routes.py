@@ -24,18 +24,23 @@ _backtest_state: dict = {
     "params": None,
     "error": None,
     "finished_at": None,
+    "task": None,
 }
 
 
 async def _run_backtest_task(days: int, strategy_codes: list[str] | None, dry_run: bool, max_llm_calls: int) -> None:
+    import asyncio
     from backtest.run_backtest import run_backtest
     _backtest_state["error"] = None
     try:
         await run_backtest(days=days, strategy_codes=strategy_codes, dry_run=dry_run, max_llm_calls=max_llm_calls)
+    except asyncio.CancelledError:
+        _backtest_state["error"] = "Stopped by user"
     except Exception as exc:
         _backtest_state["error"] = str(exc)
     finally:
         _backtest_state["running"] = False
+        _backtest_state["task"] = None
         _backtest_state["finished_at"] = datetime.now(timezone.utc).isoformat()
 
 Auth = Annotated[str, Depends(require_auth)]
@@ -184,13 +189,25 @@ async def backtest_run(
     _backtest_state["started_at"] = datetime.now(timezone.utc).isoformat()
     _backtest_state["params"] = {"days": days, "dry_run": is_dry_run, "max_llm_calls": max_llm_calls, "strategies": strategies}
     _backtest_state["finished_at"] = None
-    asyncio.create_task(_run_backtest_task(days, strategies or None, is_dry_run, max_llm_calls))
+    task = asyncio.create_task(_run_backtest_task(days, strategies or None, is_dry_run, max_llm_calls))
+    _backtest_state["task"] = task
     return JSONResponse({"status": "started"})
 
 
 @router.get("/api/backtest/status")
 async def backtest_status(_: Auth):
-    return JSONResponse(_backtest_state)
+    # don't serialise the Task object
+    state = {k: v for k, v in _backtest_state.items() if k != "task"}
+    return JSONResponse(state)
+
+
+@router.post("/api/backtest/stop")
+async def backtest_stop(_: Auth):
+    task = _backtest_state.get("task")
+    if task and not task.done():
+        task.cancel()
+        return JSONResponse({"status": "stopping"})
+    return JSONResponse({"status": "not_running"})
 
 
 @router.post("/api/backtest/clear")

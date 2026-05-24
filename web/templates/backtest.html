@@ -45,6 +45,10 @@
         class="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
         Run Backtest
       </button>
+      <button type="button" id="bt-stop-btn"
+        class="hidden px-4 py-2 bg-orange-500 text-white text-sm font-medium rounded hover:bg-orange-600">
+        Stop
+      </button>
       <button type="button" id="bt-clear-btn"
         class="px-4 py-2 bg-white border border-red-300 text-red-600 text-sm font-medium rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed">
         Clear Results
@@ -57,12 +61,18 @@
 (function () {
   const form = document.getElementById('bt-form');
   const btn = document.getElementById('bt-btn');
+  const stopBtn = document.getElementById('bt-stop-btn');
   const statusEl = document.getElementById('bt-status');
   let poll;
 
   function showStatus(msg, color) {
     statusEl.className = 'mb-4 px-3 py-2 rounded text-sm font-medium ' + color;
     statusEl.textContent = msg;
+  }
+
+  function setRunning(running) {
+    btn.disabled = running;
+    stopBtn.classList.toggle('hidden', !running);
   }
 
   function startPoll() {
@@ -73,9 +83,10 @@
         showStatus('Running… started ' + new Date(s.started_at).toLocaleTimeString(), 'bg-yellow-100 text-yellow-800');
       } else {
         clearInterval(poll);
-        btn.disabled = false;
+        setRunning(false);
         if (s.error) {
-          showStatus('Error: ' + s.error, 'bg-red-100 text-red-700');
+          showStatus(s.error === 'Stopped by user' ? 'Stopped.' : 'Error: ' + s.error,
+            s.error === 'Stopped by user' ? 'bg-gray-100 text-gray-600' : 'bg-red-100 text-red-700');
         } else if (s.finished_at) {
           showStatus('Completed at ' + new Date(s.finished_at).toLocaleTimeString() + ' — refresh to see results', 'bg-green-100 text-green-700');
         }
@@ -87,12 +98,18 @@
     const r = await fetch('/api/backtest/status');
     const s = await r.json();
     if (s.running) {
-      btn.disabled = true;
+      setRunning(true);
       showStatus('Running… started ' + new Date(s.started_at).toLocaleTimeString(), 'bg-yellow-100 text-yellow-800');
       startPoll();
     }
   }
   checkOnLoad();
+
+  stopBtn.addEventListener('click', async () => {
+    stopBtn.disabled = true;
+    await fetch('/api/backtest/stop', { method: 'POST' });
+    stopBtn.disabled = false;
+  });
 
   document.getElementById('bt-clear-btn').addEventListener('click', async () => {
     if (!confirm('Delete all backtest bets and signals?')) return;
@@ -110,18 +127,18 @@
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    btn.disabled = true;
+    setRunning(true);
     const fd = new FormData(form);
     const r = await fetch('/api/backtest/run', { method: 'POST', body: fd });
     const data = await r.json();
     if (r.status === 409) {
       showStatus('Already running', 'bg-yellow-100 text-yellow-800');
-      btn.disabled = false;
+      setRunning(false);
       return;
     }
     if (!r.ok) {
       showStatus('Error: ' + (data.error || r.statusText), 'bg-red-100 text-red-700');
-      btn.disabled = false;
+      setRunning(false);
       return;
     }
     showStatus('Started…', 'bg-yellow-100 text-yellow-800');
@@ -132,10 +149,26 @@
 
 {% if bets %}
 <div class="bg-white rounded-lg border overflow-x-auto">
-  <div class="px-5 py-3 border-b flex items-center justify-between">
-    <h2 class="font-semibold text-sm">Backtest Results</h2>
-    <span class="text-xs text-gray-400">{{ bets|length }} simulated bets</span>
+  <div class="px-5 py-3 border-b">
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <h2 class="font-semibold text-sm">Backtest Results</h2>
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-xs text-gray-400 mr-1">Filter:</span>
+        <button onclick="filterStrategy('all')" id="f-all"
+          class="filter-btn px-2.5 py-1 rounded text-xs font-medium bg-blue-600 text-white">All</button>
+        {% for s in strategies %}
+        <button onclick="filterStrategy('{{ s.code }}')" id="f-{{ s.code }}"
+          class="filter-btn px-2.5 py-1 rounded text-xs font-medium border border-gray-300 text-gray-600 hover:bg-gray-50">
+          {{ s.code }}
+        </button>
+        {% endfor %}
+      </div>
+    </div>
+
+    <!-- Stats bar -->
+    <div id="bt-stats" class="mt-3 flex flex-wrap gap-4 text-xs text-gray-500"></div>
   </div>
+
   <table class="w-full text-sm">
     <thead class="bg-gray-50 text-xs text-gray-500 uppercase">
       <tr>
@@ -149,9 +182,12 @@
         <th class="px-4 py-2 text-right">Simulated P&amp;L</th>
       </tr>
     </thead>
-    <tbody class="divide-y divide-gray-100">
+    <tbody class="divide-y divide-gray-100" id="bt-tbody">
       {% for bet, market, strategy in bets %}
-      <tr class="hover:bg-gray-50">
+      <tr class="hover:bg-gray-50"
+          data-strategy="{{ strategy.code }}"
+          data-outcome="{{ bet.outcome }}"
+          data-pnl="{{ bet.pnl or 0 }}">
         <td class="px-4 py-2 max-w-xs truncate" title="{{ market.question }}">{{ market.question[:65] }}</td>
         <td class="px-4 py-2 font-mono text-xs">{{ strategy.code }}</td>
         <td class="px-4 py-2">
@@ -185,6 +221,50 @@
     </tbody>
   </table>
 </div>
+
+<script>
+(function () {
+  let currentFilter = 'all';
+
+  function updateStats() {
+    const rows = document.querySelectorAll('#bt-tbody tr:not([style*="none"])');
+    let wins = 0, losses = 0, pnl = 0;
+    rows.forEach(r => {
+      if (r.dataset.outcome === 'win') wins++;
+      else if (r.dataset.outcome === 'loss') losses++;
+      pnl += parseFloat(r.dataset.pnl) || 0;
+    });
+    const total = wins + losses;
+    const wr = total > 0 ? (wins / total * 100).toFixed(1) : '—';
+    const pnlFmt = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2);
+    const pnlColor = pnl >= 0 ? 'text-green-600 font-semibold' : 'text-red-600 font-semibold';
+
+    document.getElementById('bt-stats').innerHTML =
+      `<span><b class="text-gray-700">${total}</b> bets</span>` +
+      `<span><b class="text-green-600">${wins}</b> wins</span>` +
+      `<span><b class="text-red-600">${losses}</b> losses</span>` +
+      `<span>Win rate <b class="text-gray-700">${wr}%</b></span>` +
+      `<span>Total P&L <b class="${pnlColor}">${pnlFmt}</b></span>`;
+  }
+
+  window.filterStrategy = function(code) {
+    currentFilter = code;
+    document.querySelectorAll('.filter-btn').forEach(b => {
+      b.className = 'filter-btn px-2.5 py-1 rounded text-xs font-medium border border-gray-300 text-gray-600 hover:bg-gray-50';
+    });
+    const active = document.getElementById('f-' + code);
+    if (active) active.className = 'filter-btn px-2.5 py-1 rounded text-xs font-medium bg-blue-600 text-white';
+
+    document.querySelectorAll('#bt-tbody tr').forEach(r => {
+      r.style.display = (code === 'all' || r.dataset.strategy === code) ? '' : 'none';
+    });
+    updateStats();
+  };
+
+  updateStats();
+})();
+</script>
+
 {% else %}
 <div class="bg-white rounded-lg border px-5 py-12 text-center text-gray-400">
   No backtest results yet. Run the backtest script first.
