@@ -51,6 +51,32 @@ CITY_STATIONS: dict[str, str] = {
     "Madrid": "LEMD",
     "Rome": "LIRF",
     "Istanbul": "LTBA",
+    # China (active on Polymarket)
+    "Zhengzhou": "ZHCC",
+    "Beijing": "ZBAA",
+    "Shanghai": "ZSPD",
+    "Guangzhou": "ZGGG",
+    "Chengdu": "ZUUU",
+    "Wuhan": "ZHHH",
+    "Shenzhen": "ZGSZ",
+    "Xian": "ZLXY",
+    "Hangzhou": "ZSHC",
+    "Nanjing": "ZSNJ",
+    "Chongqing": "ZUCK",
+    "Kunming": "ZPPP",
+    "Tianjin": "ZBTJ",
+    "Harbin": "ZYHB",
+    # Other Asia
+    "Taipei": "RCTP",
+    "Osaka": "RJBB",
+    # Europe
+    "Vienna": "LOWW",
+    "Warsaw": "EPWA",
+    "Stockholm": "ESSA",
+    "Zurich": "LSZH",
+    # Middle East / Africa
+    "Riyadh": "OERK",
+    "Johannesburg": "FAOR",
 }
 
 # IATA → (latitude, longitude)
@@ -99,6 +125,32 @@ STATION_COORDS: dict[str, tuple[float, float]] = {
     "LEMD": (40.472, -3.561),
     "LIRF": (41.800, 12.239),
     "LTBA": (40.976, 28.815),
+    # China
+    "ZHCC": (34.519, 113.841),
+    "ZBAA": (40.080, 116.585),
+    "ZSPD": (31.143, 121.805),
+    "ZGGG": (23.392, 113.300),
+    "ZUUU": (30.578, 103.947),
+    "ZHHH": (30.783, 114.208),
+    "ZGSZ": (22.639, 113.811),
+    "ZLXY": (34.447, 108.752),
+    "ZSHC": (30.235, 120.434),
+    "ZSNJ": (31.742, 118.862),
+    "ZUCK": (29.720, 106.640),
+    "ZPPP": (24.992, 102.743),
+    "ZBTJ": (39.124, 117.346),
+    "ZYHB": (45.623, 126.250),
+    # Other Asia
+    "RCTP": (25.077, 121.233),
+    "RJBB": (34.786, 135.438),
+    # Europe
+    "LOWW": (48.110, 16.569),
+    "EPWA": (52.166, 20.967),
+    "ESSA": (59.652, 17.919),
+    "LSZH": (47.458, 8.548),
+    # Middle East / Africa
+    "OERK": (24.958, 46.699),
+    "FAOR": (-26.139, 28.246),
 }
 
 _MONTH_MAP = {
@@ -113,7 +165,7 @@ _DATE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _THRESHOLD_PATTERN = re.compile(
-    r"(?P<condition>exceed|above|below|under|reach|at least|no more than|less than)\s+"
+    r"(?P<condition>exceed|above|below|under|reach|at least|no more than|less than|be)\s+"
     r"(?P<value>-?\d+(?:\.\d+)?)\s*(?P<unit>°?[FC])?",
     re.IGNORECASE,
 )
@@ -198,7 +250,7 @@ def _extract_threshold(question: str) -> tuple[float | None, str | None, str | N
     unit: str | None = raw_unit if raw_unit in ("F", "C") else "C"
 
     raw_cond = m.group("condition").lower()
-    if any(w in raw_cond for w in ("exceed", "above", "reach", "at least", "higher")):
+    if any(w in raw_cond for w in ("exceed", "above", "reach", "at least", "higher", "be")):
         condition = "above"
     else:
         condition = "below"

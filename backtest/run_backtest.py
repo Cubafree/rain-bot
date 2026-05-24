@@ -294,16 +294,29 @@ async def _get_signal_price(gm) -> float | None:
     Results are cached in the shared diskcache CACHE instance to avoid
     redundant network calls on re-runs.
     """
-    if not gm.clobTokenIds:
-        logger.debug("No clobTokenIds, skipping CLOB lookup", market_id=gm.id)
-        return None
-
     if gm.endDateIso is None:
         logger.debug("No endDateIso, skipping CLOB lookup", market_id=gm.id)
         return None
 
-    # YES token is always index 0 in clobTokenIds
-    yes_token_id = gm.clobTokenIds[0]
+    # Prefer explicit clobTokenIds; fall back to CLOB API lookup via conditionId
+    if gm.clobTokenIds:
+        yes_token_id = gm.clobTokenIds[0]
+    elif gm.conditionId:
+        # Cache the token_id lookup to avoid redundant CLOB API calls on re-runs
+        token_cache_key = f"token_id:{gm.conditionId}"
+        cached_token = CACHE.get(token_cache_key)
+        if cached_token is not None:
+            yes_token_id = cached_token
+        else:
+            yes_token_id = await polymarket.get_yes_token_id(gm.conditionId)
+            if yes_token_id:
+                CACHE.set(token_cache_key, yes_token_id, expire=86400 * 90)
+        if not yes_token_id:
+            logger.debug("Could not resolve YES token ID", market_id=gm.id, condition_id=gm.conditionId)
+            return None
+    else:
+        logger.debug("No clobTokenIds and no conditionId", market_id=gm.id)
+        return None
 
     # Signal time: 24h before market close
     signal_time = gm.endDateIso - timedelta(hours=24)

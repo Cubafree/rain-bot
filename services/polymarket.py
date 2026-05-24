@@ -210,6 +210,29 @@ async def get_resolved_markets(category: str = "weather", days: int = 180) -> li
     return markets
 
 
+async def get_yes_token_id(condition_id: str) -> str | None:
+    """Fetch the YES clobTokenId for a market given its hex conditionId.
+
+    Falls back gracefully — returns None on any error.
+    Used when clobTokenIds is not populated on the GammaMarket object.
+    """
+    async with httpx.AsyncClient() as client:
+        try:
+            data = await _get(client, f"{CLOB_BASE}/markets/{condition_id}")
+        except Exception as e:
+            logger.warning("CLOB market lookup failed", error=str(e), condition_id=condition_id)
+            return None
+
+    tokens = data.get("tokens", [])
+    for token in tokens:
+        if token.get("outcome", "").lower() in ("yes", "true"):
+            return str(token.get("token_id", ""))
+    # If outcomes aren't labelled, YES is index 0 by convention
+    if tokens:
+        return str(tokens[0].get("token_id", ""))
+    return None
+
+
 async def get_price_at_time(
     token_id: str,
     timestamp: datetime,
