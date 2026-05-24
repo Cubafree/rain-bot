@@ -172,7 +172,7 @@ async def analyze(
                     logger.error("Both LLM models failed", error=str(e2))
                     return AnalysisResult(signal=None, llm_model=model, tokens_used=0)
 
-    raw = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    raw = data.get("choices", [{}])[0].get("message", {}).get("content") or ""
     tokens = data.get("usage", {}).get("total_tokens", 0)
 
     signal = _parse_llm_response(raw, yes_price, no_price)
@@ -197,6 +197,8 @@ async def health_check() -> bool:
 
 
 def _parse_llm_response(raw: str, yes_price: float, no_price: float) -> LLMSignal | None:
+    if not raw:
+        return None
     # Strip markdown fences
     cleaned = re.sub(r"```(?:json)?|```", "", raw).strip()
 
