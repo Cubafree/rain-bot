@@ -108,7 +108,7 @@ def upgrade() -> None:
         sa.Column("bets_placed", sa.Integer(), server_default="0"),
         sa.Column("llm_tokens_used", sa.Integer(), server_default="0"),
         sa.Column("llm_cost_usd", sa.Numeric(8, 5), server_default="0"),
-        sa.Column("errors", postgresql.JSONB(), server_default="'[]'::jsonb"),
+        sa.Column("errors", postgresql.JSONB(), server_default=sa.text("'[]'::jsonb")),
         sa.Column("started_at", sa.DateTime(timezone=True)),
         sa.Column("finished_at", sa.DateTime(timezone=True)),
     )
