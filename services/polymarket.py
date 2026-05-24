@@ -42,12 +42,15 @@ class GammaMarket(BaseModel):
     conditionId: str | None = None
     clobTokenIds: list[str] = []
 
-    @field_validator("outcomePrices", mode="before")
+    @field_validator("outcomePrices", "clobTokenIds", mode="before")
     @classmethod
-    def parse_prices(cls, v: Any) -> list[str]:
+    def parse_json_list(cls, v: Any) -> list[str]:
         if isinstance(v, str):
             import json
-            return json.loads(v)
+            try:
+                return json.loads(v)
+            except Exception:
+                return []
         return v or []
 
     @property
