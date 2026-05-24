@@ -171,6 +171,17 @@ async def run_backtest(
                 if not db_strategy:
                     continue
 
+                # Skip if a backtest signal already exists for this market+strategy
+                # (prevents UniqueViolation on re-runs)
+                existing_signal_r = await db.execute(
+                    select(Signal.id).where(
+                        Signal.market_id == market.id,
+                        Signal.strategy_id == db_strategy.id,
+                    )
+                )
+                if existing_signal_r.scalar_one_or_none() is not None:
+                    continue
+
                 sig = signal_result.signal
                 signal_obj = Signal(
                     market_id=market.id,
