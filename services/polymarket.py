@@ -142,9 +142,11 @@ async def get_resolved_markets(category: str = "weather", days: int = 180) -> li
                     continue
 
                 # stop paginating once we're past the cutoff window
-                if m.endDateIso and m.endDateIso < cutoff:
-                    stop = True
-                    break
+                if m.endDateIso:
+                    end = m.endDateIso if m.endDateIso.tzinfo else m.endDateIso.replace(tzinfo=timezone.utc)
+                    if end < cutoff:
+                        stop = True
+                        break
 
                 if m.is_weather:
                     markets.append(m)
