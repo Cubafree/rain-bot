@@ -151,6 +151,12 @@ async def _process_market(
     if parsed.target_date is None or parsed.latitude is None:
         return
 
+    from datetime import date as _date
+    days_until = (parsed.target_date - _date.today()).days
+    if days_until > 16:
+        logger.debug("Market beyond 16-day forecast window, skipping", station=parsed.station, days_until=days_until)
+        return
+
     # Upsert market record
     existing = (
         await db.execute(select(Market).where(Market.polymarket_id == gm.id))

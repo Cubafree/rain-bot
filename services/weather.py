@@ -76,7 +76,7 @@ async def get_forecast(
         try:
             data = await _fetch(client, FORECAST_URL, params)
         except Exception as e:
-            logger.error("Weather forecast failed", station=station, error=str(e))
+            logger.error(f"Weather forecast failed: {e}", station=station)
             return None
 
     summary = _build_summary(data, station, target_date, threshold, threshold_unit)
