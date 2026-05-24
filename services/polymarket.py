@@ -116,52 +116,62 @@ async def get_open_markets(category: str = "weather") -> list[GammaMarket]:
 
 
 async def get_resolved_markets(category: str = "weather", days: int = 180) -> list[GammaMarket]:
-    """Fetch resolved markets for backtesting."""
+    """Fetch resolved weather markets for backtesting via the /events endpoint."""
     import asyncio
-    from datetime import timedelta, timezone
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    from datetime import timedelta, timezone as tz
 
-    markets = []
+    cutoff = datetime.now(tz.utc) - timedelta(days=days)
+    markets: list[GammaMarket] = []
     offset = 0
     limit = 100
 
     async with httpx.AsyncClient() as client:
         while True:
             try:
-                data = await _get(
+                events = await _get(
                     client,
-                    f"{GAMMA_BASE}/markets",
+                    f"{GAMMA_BASE}/events",
                     closed="true",
+                    tag_slug="weather",
+                    order="endDate",
+                    ascending="false",
                     limit=limit,
                     offset=offset,
                 )
             except Exception as e:
-                logger.error(f"Failed to fetch resolved markets: {e}")
+                logger.error(f"Failed to fetch resolved weather events: {e}")
                 break
-            await asyncio.sleep(1.0)  # avoid rate limiting between pages
 
-            raw_list = data if isinstance(data, list) else data.get("markets", [])
-            if not raw_list:
+            if not isinstance(events, list) or not events:
                 break
 
             stop = False
-            for item in raw_list:
+            for event in events:
+                # parse event end date to check cutoff
+                end_str = event.get("endDate") or event.get("closedTime", "")
                 try:
-                    m = GammaMarket.model_validate(item)
-                except Exception:
-                    continue
-
-                # stop paginating once we're past the cutoff window
-                if m.endDateIso:
-                    end = m.endDateIso if m.endDateIso.tzinfo else m.endDateIso.replace(tzinfo=timezone.utc)
-                    if end < cutoff:
+                    end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                    if end_dt.tzinfo is None:
+                        end_dt = end_dt.replace(tzinfo=tz.utc)
+                    if end_dt < cutoff:
                         stop = True
                         break
+                except Exception:
+                    pass
 
-                if m.is_weather:
-                    markets.append(m)
+                tags = event.get("tags", [])
+                for mkt in event.get("markets", []):
+                    item = dict(mkt)
+                    # inject event-level fields the nested market lacks
+                    item.setdefault("tags", tags)
+                    item["endDateIso"] = mkt.get("endDate") or event.get("endDate")
+                    try:
+                        markets.append(GammaMarket.model_validate(item))
+                    except Exception:
+                        pass
 
-            if stop or len(raw_list) < limit:
+            await asyncio.sleep(0.5)
+            if stop or len(events) < limit:
                 break
             offset += limit
 
