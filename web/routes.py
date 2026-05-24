@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import Integer, desc, func, select
+from sqlalchemy import Integer, delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -191,6 +191,16 @@ async def backtest_run(
 @router.get("/api/backtest/status")
 async def backtest_status(_: Auth):
     return JSONResponse(_backtest_state)
+
+
+@router.post("/api/backtest/clear")
+async def backtest_clear(_: Auth, db: DB):
+    if _backtest_state["running"]:
+        return JSONResponse({"error": "backtest is running"}, status_code=409)
+    await db.execute(delete(Bet).where(Bet.mode == "backtest"))
+    await db.execute(delete(Signal).where(Signal.source == "backtest"))
+    await db.commit()
+    return JSONResponse({"status": "cleared"})
 
 
 @router.get("/backtest", response_class=HTMLResponse)

@@ -40,10 +40,16 @@
       </div>
     </div>
 
-    <button type="submit" id="bt-btn"
-      class="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
-      Run Backtest
-    </button>
+    <div class="flex items-center gap-3">
+      <button type="submit" id="bt-btn"
+        class="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
+        Run Backtest
+      </button>
+      <button type="button" id="bt-clear-btn"
+        class="px-4 py-2 bg-white border border-red-300 text-red-600 text-sm font-medium rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed">
+        Clear Results
+      </button>
+    </div>
   </form>
 </div>
 
@@ -87,6 +93,20 @@
     }
   }
   checkOnLoad();
+
+  document.getElementById('bt-clear-btn').addEventListener('click', async () => {
+    if (!confirm('Delete all backtest bets and signals?')) return;
+    const clearBtn = document.getElementById('bt-clear-btn');
+    clearBtn.disabled = true;
+    const r = await fetch('/api/backtest/clear', { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok) {
+      showStatus('Error: ' + (data.error || r.statusText), 'bg-red-100 text-red-700');
+    } else {
+      showStatus('Backtest data cleared — refresh to update the table', 'bg-green-100 text-green-700');
+    }
+    clearBtn.disabled = false;
+  });
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
