@@ -210,6 +210,33 @@ async def get_resolved_markets(category: str = "weather", days: int = 180) -> li
     return markets
 
 
+async def get_market_token_ids(market_id: str) -> tuple[str | None, list[str]]:
+    """Fetch conditionId and clobTokenIds from Gamma /markets/{id}.
+
+    Used as last-resort fallback when the events endpoint doesn't populate
+    those fields on nested market objects.
+    Returns (condition_id_or_None, clob_token_ids_list).
+    """
+    import json as _json
+
+    async with httpx.AsyncClient() as client:
+        try:
+            data = await _get(client, f"{GAMMA_BASE}/markets/{market_id}")
+        except Exception as e:
+            logger.warning("Gamma market fetch failed", error=str(e), market_id=market_id)
+            return None, []
+
+    condition_id = data.get("conditionId") or None
+    raw_clob = data.get("clobTokenIds") or []
+    if isinstance(raw_clob, str):
+        try:
+            raw_clob = _json.loads(raw_clob)
+        except Exception:
+            raw_clob = []
+
+    return condition_id, list(raw_clob)
+
+
 async def get_yes_token_id(condition_id: str) -> str | None:
     """Fetch the YES clobTokenId for a market given its hex conditionId.
 

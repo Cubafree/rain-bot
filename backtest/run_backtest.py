@@ -315,8 +315,24 @@ async def _get_signal_price(gm) -> float | None:
             logger.debug("Could not resolve YES token ID", market_id=gm.id, condition_id=gm.conditionId)
             return None
     else:
-        logger.debug("No clobTokenIds and no conditionId", market_id=gm.id)
-        return None
+        # Last resort: fetch full market from Gamma to get conditionId + clobTokenIds
+        token_cache_key = f"gamma_token:{gm.id}"
+        cached_token = CACHE.get(token_cache_key)
+        if cached_token is not None:
+            yes_token_id = cached_token
+        else:
+            cond_id, clob_ids = await polymarket.get_market_token_ids(gm.id)
+            if clob_ids:
+                yes_token_id = clob_ids[0]
+            elif cond_id:
+                yes_token_id = await polymarket.get_yes_token_id(cond_id)
+            else:
+                yes_token_id = None
+            if yes_token_id:
+                CACHE.set(token_cache_key, yes_token_id, expire=86400 * 90)
+        if not yes_token_id:
+            logger.debug("Could not resolve YES token ID via any method", market_id=gm.id)
+            return None
 
     # Signal time: 24h before market close
     signal_time = gm.endDateIso - timedelta(hours=24)
