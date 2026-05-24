@@ -55,9 +55,14 @@ class GammaMarket(BaseModel):
         except (IndexError, ValueError):
             return 0.5
 
+    _WEATHER_KEYWORDS = ("temperature", "rain", "snow", "high", "°f", "°c", "heat", "cold", "precipitation", "forecast")
+
     @property
     def is_weather(self) -> bool:
-        return any(t.get("slug") == "weather" for t in self.tags)
+        if any(t.get("slug") == "weather" for t in self.tags):
+            return True
+        q = self.question.lower()
+        return any(kw in q for kw in self._WEATHER_KEYWORDS)
 
 
 @retry(
@@ -89,7 +94,7 @@ async def get_open_markets(category: str = "weather") -> list[GammaMarket]:
                 limit=200,
             )
         except Exception as e:
-            logger.error("Failed to fetch open markets", error=str(e))
+            logger.error(f"Failed to fetch open markets: {e}")
             return []
 
     markets = []
@@ -104,6 +109,9 @@ async def get_open_markets(category: str = "weather") -> list[GammaMarket]:
 
 async def get_resolved_markets(category: str = "weather", days: int = 180) -> list[GammaMarket]:
     """Fetch resolved markets for backtesting."""
+    from datetime import timedelta, timezone
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
     markets = []
     offset = 0
     limit = 100
@@ -114,29 +122,38 @@ async def get_resolved_markets(category: str = "weather", days: int = 180) -> li
                 data = await _get(
                     client,
                     f"{GAMMA_BASE}/markets",
-                    tag=category,
                     closed="true",
                     limit=limit,
                     offset=offset,
                 )
             except Exception as e:
-                logger.error("Failed to fetch resolved markets", error=str(e))
+                logger.error(f"Failed to fetch resolved markets: {e}")
                 break
 
             raw_list = data if isinstance(data, list) else data.get("markets", [])
             if not raw_list:
                 break
 
+            stop = False
             for item in raw_list:
                 try:
-                    markets.append(GammaMarket.model_validate(item))
+                    m = GammaMarket.model_validate(item)
                 except Exception:
-                    pass
+                    continue
 
-            if len(raw_list) < limit:
+                # stop paginating once we're past the cutoff window
+                if m.endDateIso and m.endDateIso < cutoff:
+                    stop = True
+                    break
+
+                if m.is_weather:
+                    markets.append(m)
+
+            if stop or len(raw_list) < limit:
                 break
             offset += limit
 
+    logger.info(f"Fetched {len(markets)} resolved weather markets (last {days}d)")
     return markets
 
 
