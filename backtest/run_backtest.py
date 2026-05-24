@@ -245,9 +245,22 @@ async def _get_cached_forecast(
 
 
 def _fake_signal(market_price: float):
-    """Return a randomized no-op result for dry runs."""
-    from services.analyzer import AnalysisResult
-    return AnalysisResult(signal=None, llm_model="dry-run", tokens_used=0)
+    """Return a randomised signal for dry runs (no LLM, tests full pipeline)."""
+    import random
+    from services.analyzer import AnalysisResult, LLMSignal
+    direction = random.choice(["YES", "NO"])
+    our_prob = random.uniform(0.55, 0.85)
+    price = market_price if direction == "YES" else 1 - market_price
+    edge = round(our_prob - price, 4)
+    signal = LLMSignal(
+        our_probability=our_prob,
+        confidence="high",
+        direction=direction,
+        edge=edge,
+        reasoning="dry-run fake signal",
+        data_quality="sufficient",
+    )
+    return AnalysisResult(signal=signal, llm_model="dry-run", tokens_used=0)
 
 
 def main():

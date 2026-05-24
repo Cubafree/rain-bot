@@ -117,6 +117,11 @@ _THRESHOLD_PATTERN = re.compile(
     r"(?P<value>-?\d+(?:\.\d+)?)\s*(?P<unit>°?[FC])?",
     re.IGNORECASE,
 )
+# handles "24°C or below" / "90°F or above" (value before condition)
+_THRESHOLD_PATTERN_REV = re.compile(
+    r"(?P<value>-?\d+(?:\.\d+)?)\s*(?P<unit>°?[FC])\s+or\s+(?P<condition>above|below|higher|lower)",
+    re.IGNORECASE,
+)
 _CITY_PATTERN = re.compile(
     r"\bin\s+(?P<city>" + "|".join(re.escape(c) for c in sorted(CITY_STATIONS, key=len, reverse=True)) + r")\b",
     re.IGNORECASE,
@@ -184,14 +189,16 @@ def _extract_city(question: str) -> str | None:
 def _extract_threshold(question: str) -> tuple[float | None, str | None, str | None]:
     m = _THRESHOLD_PATTERN.search(question)
     if not m:
+        m = _THRESHOLD_PATTERN_REV.search(question)
+    if not m:
         return None, None, None
 
     value = float(m.group("value"))
     raw_unit = (m.group("unit") or "").replace("°", "").upper()
-    unit: str | None = raw_unit if raw_unit in ("F", "C") else "F"
+    unit: str | None = raw_unit if raw_unit in ("F", "C") else "C"
 
     raw_cond = m.group("condition").lower()
-    if any(w in raw_cond for w in ("exceed", "above", "reach", "at least")):
+    if any(w in raw_cond for w in ("exceed", "above", "reach", "at least", "higher")):
         condition = "above"
     else:
         condition = "below"
