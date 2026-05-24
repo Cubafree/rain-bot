@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Markets — Polymarket Bot{% endblock %}
+{% block content %}
+
+<h1 class="text-2xl font-bold mb-6">Active Markets</h1>
+
+<div class="bg-white rounded-lg border mb-8 overflow-x-auto">
+  <table class="w-full text-sm">
+    <thead class="bg-gray-50 text-xs text-gray-500 uppercase">
+      <tr>
+        <th class="px-4 py-2 text-left">Question</th>
+        <th class="px-4 py-2 text-left">City</th>
+        <th class="px-4 py-2 text-left">Station</th>
+        <th class="px-4 py-2 text-right">Target Date</th>
+        <th class="px-4 py-2 text-right">Closes</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+      {% for market in markets %}
+      <tr class="hover:bg-gray-50">
+        <td class="px-4 py-2 max-w-sm truncate" title="{{ market.question }}">{{ market.question[:80] }}</td>
+        <td class="px-4 py-2">{{ market.city or '—' }}</td>
+        <td class="px-4 py-2 font-mono text-xs">{{ market.weather_station or '—' }}</td>
+        <td class="px-4 py-2 text-right">{{ market.target_date or '—' }}</td>
+        <td class="px-4 py-2 text-right text-gray-400 text-xs">
+          {% if market.close_time %}{{ market.close_time.strftime('%m/%d %H:%M') }}{% else %}—{% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="px-4 py-8 text-center text-gray-400">No active markets</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2 class="text-lg font-semibold mb-4">Latest Signals</h2>
+<div class="bg-white rounded-lg border overflow-x-auto">
+  <table class="w-full text-sm">
+    <thead class="bg-gray-50 text-xs text-gray-500 uppercase">
+      <tr>
+        <th class="px-4 py-2 text-left">Market</th>
+        <th class="px-4 py-2 text-left">Strategy</th>
+        <th class="px-4 py-2 text-left">Direction</th>
+        <th class="px-4 py-2 text-right">Our Prob</th>
+        <th class="px-4 py-2 text-right">Market Price</th>
+        <th class="px-4 py-2 text-right">Edge</th>
+        <th class="px-4 py-2 text-left">Reasoning</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+      {% for signal, market, strategy in signals %}
+      <tr class="hover:bg-gray-50">
+        <td class="px-4 py-2 max-w-xs truncate" title="{{ market.question }}">{{ market.question[:60] }}</td>
+        <td class="px-4 py-2 font-mono text-xs">{{ strategy.code }}</td>
+        <td class="px-4 py-2">
+          <span class="px-2 py-0.5 rounded text-xs font-semibold
+            {% if signal.direction == 'YES' %}bg-green-100 text-green-700{% else %}bg-red-100 text-red-700{% endif %}">
+            {{ signal.direction }}
+          </span>
+        </td>
+        <td class="px-4 py-2 text-right font-mono">{{ "%.2f"|format(signal.our_probability|float * 100) }}%</td>
+        <td class="px-4 py-2 text-right font-mono">{{ "%.2f"|format(signal.market_price|float * 100) }}%</td>
+        <td class="px-4 py-2 text-right font-mono font-semibold
+          {% if signal.edge|float > 0 %}text-green-600{% else %}text-red-600{% endif %}">
+          {{ "%.3f"|format(signal.edge|float) }}
+        </td>
+        <td class="px-4 py-2 text-xs text-gray-500 max-w-xs truncate" title="{{ signal.reasoning }}">
+          {{ (signal.reasoning or '')[:80] }}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="px-4 py-8 text-center text-gray-400">No signals yet</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% endblock %}

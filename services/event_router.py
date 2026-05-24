@@ -1,0 +1,176 @@
+"""Parse free-text Polymarket questions into structured market data."""
+import re
+from dataclasses import dataclass
+from datetime import date
+from typing import Literal
+
+from loguru import logger
+
+CITY_STATIONS: dict[str, str] = {
+    "New York": "KLGA",
+    "Dallas": "KDAL",
+    "Chicago": "KMDW",
+    "Los Angeles": "KLAX",
+    "Miami": "KMIA",
+    "Atlanta": "KATL",
+    "London": "EGLL",
+    "Paris": "LFPG",
+    "Seoul": "RKSS",
+    "Tokyo": "RJTT",
+    "Sydney": "YSSY",
+    "Sao Paulo": "SBGR",
+    "Hong Kong": "VHHH",
+    "Singapore": "WSSS",
+    "Dubai": "OMDB",
+    "Houston": "KHOU",
+    "Phoenix": "KPHX",
+    "Las Vegas": "KLAS",
+    "Seattle": "KSEA",
+    "Denver": "KDEN",
+    "Boston": "KBOS",
+    "Minneapolis": "KMSP",
+    "Detroit": "KDTW",
+}
+
+# IATA → (latitude, longitude)
+STATION_COORDS: dict[str, tuple[float, float]] = {
+    "KLGA": (40.777, -73.873),
+    "KDAL": (32.847, -96.852),
+    "KMDW": (41.786, -87.752),
+    "KLAX": (33.943, -118.408),
+    "KMIA": (25.796, -80.287),
+    "KATL": (33.641, -84.427),
+    "EGLL": (51.477, -0.461),
+    "LFPG": (49.013, 2.550),
+    "RKSS": (37.558, 126.791),
+    "RJTT": (35.552, 139.780),
+    "YSSY": (-33.947, 151.177),
+    "SBGR": (-23.432, -46.469),
+    "VHHH": (22.308, 113.915),
+    "WSSS": (1.359, 103.989),
+    "OMDB": (25.253, 55.364),
+    "KHOU": (29.645, -95.279),
+    "KPHX": (33.438, -112.008),
+    "KLAS": (36.080, -115.152),
+    "KSEA": (47.449, -122.309),
+    "KDEN": (39.856, -104.674),
+    "KBOS": (42.365, -71.009),
+    "KMSP": (44.881, -93.222),
+    "KDTW": (42.212, -83.353),
+}
+
+_MONTH_MAP = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    "january": 1, "february": 2, "march": 3, "april": 4, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+}
+
+_DATE_PATTERN = re.compile(
+    r"(?:on\s+)?(?P<month>[A-Za-z]+)\s+(?P<day>\d{1,2})(?:,\s*(?P<year>\d{4}))?",
+    re.IGNORECASE,
+)
+_THRESHOLD_PATTERN = re.compile(
+    r"(?P<condition>exceed|above|below|under|reach|at least|no more than|less than)\s+"
+    r"(?P<value>-?\d+(?:\.\d+)?)\s*(?P<unit>°?[FC])?",
+    re.IGNORECASE,
+)
+_CITY_PATTERN = re.compile(
+    r"\bin\s+(?P<city>" + "|".join(re.escape(c) for c in sorted(CITY_STATIONS, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class ParsedMarket:
+    city: str | None
+    station: str | None
+    latitude: float | None
+    longitude: float | None
+    threshold: float | None
+    unit: Literal["F", "C"] | None
+    condition: Literal["above", "below"] | None
+    target_date: date | None
+    parse_confidence: float
+
+
+def parse_market(question: str) -> ParsedMarket:
+    """Extract structured fields from a Polymarket weather question.
+
+    Returns a ParsedMarket; fields are None if extraction failed.
+    parse_confidence < 0.8 means the market should be skipped.
+    """
+    city = _extract_city(question)
+    station = CITY_STATIONS.get(city) if city else None
+    coords = STATION_COORDS.get(station) if station else None
+
+    threshold, unit, condition = _extract_threshold(question)
+    target_date = _extract_date(question)
+
+    fields_found = sum(
+        x is not None for x in [city, station, threshold, condition, target_date]
+    )
+    confidence = fields_found / 5.0
+
+    if city and not station:
+        logger.warning("Unknown city in question — add to CITY_STATIONS", question=question, city=city)
+
+    return ParsedMarket(
+        city=city,
+        station=station,
+        latitude=coords[0] if coords else None,
+        longitude=coords[1] if coords else None,
+        threshold=threshold,
+        unit=unit,
+        condition=condition,
+        target_date=target_date,
+        parse_confidence=confidence,
+    )
+
+
+def _extract_city(question: str) -> str | None:
+    m = _CITY_PATTERN.search(question)
+    if not m:
+        return None
+    raw = m.group("city")
+    for city in CITY_STATIONS:
+        if city.lower() == raw.lower():
+            return city
+    return None
+
+
+def _extract_threshold(question: str) -> tuple[float | None, str | None, str | None]:
+    m = _THRESHOLD_PATTERN.search(question)
+    if not m:
+        return None, None, None
+
+    value = float(m.group("value"))
+    raw_unit = (m.group("unit") or "").replace("°", "").upper()
+    unit: str | None = raw_unit if raw_unit in ("F", "C") else "F"
+
+    raw_cond = m.group("condition").lower()
+    if any(w in raw_cond for w in ("exceed", "above", "reach", "at least")):
+        condition = "above"
+    else:
+        condition = "below"
+
+    return value, unit, condition
+
+
+def _extract_date(question: str) -> date | None:
+    m = _DATE_PATTERN.search(question)
+    if not m:
+        return None
+
+    month_str = m.group("month").lower()
+    month = _MONTH_MAP.get(month_str)
+    if not month:
+        return None
+
+    day = int(m.group("day"))
+    year = int(m.group("year")) if m.group("year") else date.today().year
+
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None

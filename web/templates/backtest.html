@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Backtest — Polymarket Bot{% endblock %}
+{% block content %}
+
+<h1 class="text-2xl font-bold mb-6">Backtest</h1>
+
+<div class="bg-white rounded-lg border p-5 mb-8">
+  <h2 class="font-semibold text-sm mb-4">Run Backtest</h2>
+  <p class="text-sm text-gray-500 mb-4">
+    Executes the strategy analyzer against historical resolved markets using archived GFS forecast data.
+    Run from the terminal: <code class="bg-gray-100 px-1 rounded">python backtest/run_backtest.py --days 90</code>
+  </p>
+  <div class="flex gap-3 flex-wrap">
+    {% for s in strategies %}
+    <span class="px-3 py-1 rounded border text-sm font-mono">{{ s.code }} {{ s.name }}</span>
+    {% endfor %}
+  </div>
+</div>
+
+{% if bets %}
+<div class="bg-white rounded-lg border overflow-x-auto">
+  <div class="px-5 py-3 border-b flex items-center justify-between">
+    <h2 class="font-semibold text-sm">Backtest Results</h2>
+    <span class="text-xs text-gray-400">{{ bets|length }} simulated bets</span>
+  </div>
+  <table class="w-full text-sm">
+    <thead class="bg-gray-50 text-xs text-gray-500 uppercase">
+      <tr>
+        <th class="px-4 py-2 text-left">Market</th>
+        <th class="px-4 py-2 text-left">Strategy</th>
+        <th class="px-4 py-2 text-left">Direction</th>
+        <th class="px-4 py-2 text-right">Our Prob</th>
+        <th class="px-4 py-2 text-right">Market Price</th>
+        <th class="px-4 py-2 text-right">Edge</th>
+        <th class="px-4 py-2 text-left">Outcome</th>
+        <th class="px-4 py-2 text-right">Simulated P&amp;L</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+      {% for bet, market, strategy in bets %}
+      <tr class="hover:bg-gray-50">
+        <td class="px-4 py-2 max-w-xs truncate" title="{{ market.question }}">{{ market.question[:65] }}</td>
+        <td class="px-4 py-2 font-mono text-xs">{{ strategy.code }}</td>
+        <td class="px-4 py-2">
+          <span class="px-1.5 py-0.5 rounded text-xs font-semibold
+            {% if bet.direction == 'YES' %}bg-green-100 text-green-700{% else %}bg-red-100 text-red-700{% endif %}">
+            {{ bet.direction }}
+          </span>
+        </td>
+        <td class="px-4 py-2 text-right font-mono">
+          {% if bet.signal %}{{ "%.1f"|format(bet.signal.our_probability|float * 100) }}%{% else %}—{% endif %}
+        </td>
+        <td class="px-4 py-2 text-right font-mono">{{ "%.3f"|format(bet.entry_price|float) }}</td>
+        <td class="px-4 py-2 text-right font-mono">
+          {% if bet.signal %}{{ "%.3f"|format(bet.signal.edge|float) }}{% else %}—{% endif %}
+        </td>
+        <td class="px-4 py-2">
+          <span class="px-1.5 py-0.5 rounded text-xs
+            {% if bet.outcome == 'win' %}bg-green-100 text-green-700
+            {% elif bet.outcome == 'loss' %}bg-red-100 text-red-700
+            {% else %}bg-yellow-100 text-yellow-700{% endif %}">
+            {{ bet.outcome }}
+          </span>
+        </td>
+        <td class="px-4 py-2 text-right font-mono font-semibold
+          {% if bet.pnl and bet.pnl|float > 0 %}text-green-600
+          {% elif bet.pnl and bet.pnl|float < 0 %}text-red-600{% endif %}">
+          {% if bet.pnl %}${{ "%.2f"|format(bet.pnl|float) }}{% else %}—{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="bg-white rounded-lg border px-5 py-12 text-center text-gray-400">
+  No backtest results yet. Run the backtest script first.
+</div>
+{% endif %}
+
+{% endblock %}

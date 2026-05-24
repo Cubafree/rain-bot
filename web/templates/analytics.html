@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Analytics — Polymarket Bot{% endblock %}
+{% block content %}
+
+<h1 class="text-2xl font-bold mb-6">Analytics</h1>
+
+<div class="bg-white rounded-lg border mb-8 overflow-x-auto">
+  <div class="px-5 py-3 border-b">
+    <h2 class="font-semibold text-sm">Strategy Performance ({{ mode }} mode)</h2>
+  </div>
+  <table class="w-full text-sm">
+    <thead class="bg-gray-50 text-xs text-gray-500 uppercase">
+      <tr>
+        <th class="px-4 py-2 text-left">Code</th>
+        <th class="px-4 py-2 text-left">Strategy</th>
+        <th class="px-4 py-2 text-right">Total Bets</th>
+        <th class="px-4 py-2 text-right">Wins</th>
+        <th class="px-4 py-2 text-right">Win Rate</th>
+        <th class="px-4 py-2 text-right">Total P&amp;L</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+      {% for row in strategy_stats %}
+      {% set win_rate = (row.wins / row.total * 100) if row.total > 0 else 0 %}
+      <tr class="hover:bg-gray-50">
+        <td class="px-4 py-2 font-mono font-semibold">{{ row.code }}</td>
+        <td class="px-4 py-2">{{ row.name }}</td>
+        <td class="px-4 py-2 text-right">{{ row.total }}</td>
+        <td class="px-4 py-2 text-right">{{ row.wins }}</td>
+        <td class="px-4 py-2 text-right font-semibold
+          {% if win_rate >= 55 %}text-green-600{% elif win_rate >= 45 %}text-yellow-600{% else %}text-red-600{% endif %}">
+          {{ "%.1f"|format(win_rate) }}%
+        </td>
+        <td class="px-4 py-2 text-right font-mono font-semibold
+          {% if row.total_pnl and row.total_pnl|float > 0 %}text-green-600
+          {% elif row.total_pnl and row.total_pnl|float < 0 %}text-red-600{% endif %}">
+          {% if row.total_pnl %}${{ "%.2f"|format(row.total_pnl|float) }}{% else %}$0.00{% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="px-4 py-8 text-center text-gray-400">No resolved bets yet</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="bg-white rounded-lg border overflow-x-auto">
+  <div class="px-5 py-3 border-b">
+    <h2 class="font-semibold text-sm">Daily Stats (last 30 days)</h2>
+  </div>
+  <table class="w-full text-sm">
+    <thead class="bg-gray-50 text-xs text-gray-500 uppercase">
+      <tr>
+        <th class="px-4 py-2 text-left">Date</th>
+        <th class="px-4 py-2 text-right">Bets</th>
+        <th class="px-4 py-2 text-right">Win Rate</th>
+        <th class="px-4 py-2 text-right">P&amp;L</th>
+        <th class="px-4 py-2 text-right">LLM Cost</th>
+        <th class="px-4 py-2 text-right">Cycles</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+      {% for stat in daily_stats %}
+      <tr class="hover:bg-gray-50">
+        <td class="px-4 py-2 font-mono text-xs">{{ stat.stat_date }}</td>
+        <td class="px-4 py-2 text-right">{{ stat.total_bets }}</td>
+        <td class="px-4 py-2 text-right">
+          {% if stat.win_rate %}{{ "%.1f"|format(stat.win_rate|float * 100) }}%{% else %}—{% endif %}
+        </td>
+        <td class="px-4 py-2 text-right font-mono
+          {% if stat.pnl_usd and stat.pnl_usd|float > 0 %}text-green-600
+          {% elif stat.pnl_usd and stat.pnl_usd|float < 0 %}text-red-600{% endif %}">
+          {% if stat.pnl_usd %}${{ "%.2f"|format(stat.pnl_usd|float) }}{% else %}—{% endif %}
+        </td>
+        <td class="px-4 py-2 text-right font-mono text-gray-500">
+          {% if stat.llm_cost_usd %}${{ "%.4f"|format(stat.llm_cost_usd|float) }}{% else %}—{% endif %}
+        </td>
+        <td class="px-4 py-2 text-right">{{ stat.cycle_count }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="px-4 py-8 text-center text-gray-400">No daily stats yet</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% endblock %}

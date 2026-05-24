@@ -1,0 +1,7 @@
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "--cov=. --cov-report=term-missing --cov-omit=tests/*,alembic/*"
+
+[tool.coverage.run]
+omit = ["tests/*", "alembic/*", "backtest/*"]

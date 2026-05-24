@@ -1,0 +1,326 @@
+"""APScheduler v3 — weather cycle synced to GFS publish times."""
+import asyncio
+from datetime import datetime, timezone
+from typing import Any
+
+from apscheduler.jobstores.memory import MemoryJobStore
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from loguru import logger
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from config import settings
+from db.models import Bet, CycleLog, Market, Signal, Strategy
+from db.session import db_session
+from services import analyzer, alerter, polymarket, weather
+from services.event_router import parse_market
+from services.resolver import run_resolution_cycle
+from services.trader import can_open_position, place_bet
+from services.whale_watcher import run_whale_cycle
+
+_consecutive_empty_cycles = 0
+
+
+def create_scheduler() -> AsyncIOScheduler:
+    jobstores = {"default": MemoryJobStore()}
+
+    try:
+        from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+        sync_url = settings.database_url
+        if "+asyncpg" in sync_url:
+            sync_url = sync_url.replace("+asyncpg", "")
+        jobstores = {"default": SQLAlchemyJobStore(url=sync_url)}
+        logger.info("Using SQLAlchemy job store for scheduler persistence")
+    except Exception as e:
+        logger.warning("SQLAlchemy job store unavailable, using memory", error=str(e))
+
+    sched = AsyncIOScheduler(jobstores=jobstores, timezone="UTC")
+
+    # GFS nominal runs: 00, 06, 12, 18 UTC. Data available ~4h later.
+    # Trigger at 04, 10, 16, 22 UTC (+ 15min buffer).
+    sched.add_job(
+        run_weather_cycle,
+        CronTrigger(hour="4,10,16,22", minute=15, timezone="UTC"),
+        id="weather_cycle",
+        name="Weather trading cycle",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=1800,
+        replace_existing=True,
+    )
+
+    # Resolution check every hour
+    sched.add_job(
+        run_resolution_cycle,
+        CronTrigger(minute=45, timezone="UTC"),
+        id="resolution_cycle",
+        name="Bet resolution cycle",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+
+    # Daily stats materialization at 00:30 UTC
+    sched.add_job(
+        materialize_daily_stats,
+        CronTrigger(hour=0, minute=30, timezone="UTC"),
+        id="daily_stats",
+        name="Daily stats rollup",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+
+    return sched
+
+
+async def run_weather_cycle() -> None:
+    global _consecutive_empty_cycles
+
+    cycle_log = CycleLog(
+        mode=settings.trading_mode,
+        started_at=datetime.now(timezone.utc),
+        errors=[],
+    )
+
+    # LLM health check before spending a full cycle
+    llm_ok = await analyzer.health_check()
+    if not llm_ok:
+        cycle_log.errors.append({"stage": "llm_health_check", "error": "OpenRouter unreachable"})
+        cycle_log.finished_at = datetime.now(timezone.utc)
+        async with db_session() as db:
+            db.add(cycle_log)
+        await alerter.send_alert("critical", "Weather cycle aborted — OpenRouter unreachable")
+        return
+
+    markets_raw = await polymarket.get_open_markets(category="weather")
+    cycle_log.markets_scanned = len(markets_raw)
+
+    async with db_session() as db:
+        strategies = (
+            await db.execute(
+                select(Strategy).where(
+                    Strategy.is_active.is_(True),
+                    Strategy.category == "weather",
+                )
+            )
+        ).scalars().all()
+
+        for gm in markets_raw:
+            try:
+                await _process_market(db, gm, strategies, cycle_log)
+            except Exception as e:
+                logger.error("Market processing failed", market_id=gm.id, error=str(e))
+                cycle_log.errors.append({
+                    "stage": "market_processing",
+                    "market_id": gm.id,
+                    "error": str(e),
+                })
+
+        cycle_log.finished_at = datetime.now(timezone.utc)
+        db.add(cycle_log)
+
+    if cycle_log.signals_found == 0:
+        _consecutive_empty_cycles += 1
+        await alerter.alert_cycle_no_signals(_consecutive_empty_cycles)
+    else:
+        _consecutive_empty_cycles = 0
+
+    logger.info(
+        "Weather cycle complete",
+        markets=cycle_log.markets_scanned,
+        signals=cycle_log.signals_found,
+        bets=cycle_log.bets_placed,
+        llm_tokens=cycle_log.llm_tokens_used,
+    )
+
+
+async def _process_market(
+    db: AsyncSession,
+    gm: Any,
+    strategies: list[Strategy],
+    cycle_log: CycleLog,
+) -> None:
+    parsed = parse_market(gm.question)
+
+    if parsed.parse_confidence < 0.8 or parsed.station is None:
+        logger.debug("Market skipped (low parse confidence)", question=gm.question[:80])
+        return
+
+    if parsed.target_date is None or parsed.latitude is None:
+        return
+
+    # Upsert market record
+    existing = (
+        await db.execute(select(Market).where(Market.polymarket_id == gm.id))
+    ).scalar_one_or_none()
+
+    if existing is None:
+        market = Market(
+            polymarket_id=gm.id,
+            question=gm.question,
+            category="weather",
+            city=parsed.city,
+            weather_station=parsed.station,
+            target_date=parsed.target_date,
+            close_time=gm.endDateIso,
+        )
+        db.add(market)
+        await db.flush()
+    else:
+        market = existing
+
+    if market.resolved or market.parse_failed:
+        return
+
+    forecast = await weather.get_forecast(
+        station=parsed.station,
+        target_date=parsed.target_date,
+        latitude=parsed.latitude,
+        longitude=parsed.longitude,
+        threshold=parsed.threshold,
+        threshold_unit=parsed.unit or "F",
+    )
+
+    if forecast is None:
+        cycle_log.errors.append({
+            "stage": "weather_fetch",
+            "market_id": market.id,
+            "error": "forecast unavailable",
+        })
+        return
+
+    tasks = [
+        _analyze_and_bet(db, market, strategy, gm, forecast, cycle_log)
+        for strategy in strategies
+    ]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _analyze_and_bet(
+    db: AsyncSession,
+    market: Market,
+    strategy: Strategy,
+    gm: Any,
+    forecast: Any,
+    cycle_log: CycleLog,
+) -> None:
+    result = await analyzer.analyze(
+        question=market.question,
+        yes_price=gm.yes_price,
+        no_price=gm.no_price,
+        strategy_code=strategy.code,
+        strategy_name=strategy.name,
+        strategy_description=strategy.description or "",
+        strategy_params=strategy.params or {},
+        forecast=forecast,
+        station=market.weather_station,
+    )
+
+    cycle_log.llm_tokens_used = (cycle_log.llm_tokens_used or 0) + result.tokens_used
+
+    if result.signal is None:
+        return
+
+    sig = result.signal
+
+    # Respect minimum confidence and edge thresholds
+    if sig.confidence != settings.min_confidence or sig.direction is None:
+        return
+    if abs(sig.edge) < settings.min_edge:
+        return
+
+    # Insert signal (skip if already exists for today)
+    try:
+        signal = Signal(
+            market_id=market.id,
+            strategy_id=strategy.id,
+            our_probability=sig.our_probability,
+            market_price=gm.yes_price if sig.direction == "YES" else gm.no_price,
+            edge=sig.edge,
+            direction=sig.direction,
+            confidence=sig.confidence,
+            reasoning=sig.reasoning,
+            forecast_data=forecast.model_dump(),
+            llm_model=result.llm_model,
+            tokens_used=result.tokens_used,
+            source="live_cycle",
+        )
+        db.add(signal)
+        await db.flush()
+        cycle_log.signals_found = (cycle_log.signals_found or 0) + 1
+    except Exception as e:
+        if "uq_signal_market_strategy_day" in str(e):
+            logger.debug("Duplicate signal skipped", market_id=market.id, strategy=strategy.code)
+        else:
+            raise
+        return
+
+    bet = await place_bet(
+        db=db,
+        signal=signal,
+        market=market,
+        strategy=strategy,
+        yes_price=gm.yes_price,
+        no_price=gm.no_price,
+    )
+    if bet:
+        cycle_log.bets_placed = (cycle_log.bets_placed or 0) + 1
+
+
+async def materialize_daily_stats() -> None:
+    """Aggregate yesterday's stats into daily_stats table."""
+    from datetime import date, timedelta
+    from sqlalchemy import func
+    from db.models import DailyStats
+
+    yesterday = date.today() - timedelta(days=1)
+
+    async with db_session() as db:
+        wins_r = await db.execute(
+            select(func.count(Bet.id)).where(
+                func.date(Bet.placed_at) == yesterday, Bet.outcome == "win"
+            )
+        )
+        losses_r = await db.execute(
+            select(func.count(Bet.id)).where(
+                func.date(Bet.placed_at) == yesterday, Bet.outcome == "loss"
+            )
+        )
+        pnl_r = await db.execute(
+            select(func.sum(Bet.pnl)).where(func.date(Bet.placed_at) == yesterday)
+        )
+        tokens_r = await db.execute(
+            select(func.sum(CycleLog.llm_tokens_used)).where(
+                func.date(CycleLog.started_at) == yesterday
+            )
+        )
+        cost_r = await db.execute(
+            select(func.sum(CycleLog.llm_cost_usd)).where(
+                func.date(CycleLog.started_at) == yesterday
+            )
+        )
+        cycles_r = await db.execute(
+            select(func.count(CycleLog.id)).where(
+                func.date(CycleLog.started_at) == yesterday
+            )
+        )
+
+        wins = wins_r.scalar_one() or 0
+        losses = losses_r.scalar_one() or 0
+        total_bets = wins + losses
+        win_rate = (wins / total_bets) if total_bets > 0 else None
+
+        stat = DailyStats(
+            stat_date=yesterday,
+            total_bets=total_bets,
+            wins=wins,
+            losses=losses,
+            win_rate=win_rate,
+            pnl_usd=pnl_r.scalar_one() or 0,
+            llm_cost_usd=cost_r.scalar_one() or 0,
+            cycle_count=cycles_r.scalar_one() or 0,
+        )
+        db.add(stat)
+        logger.info("Daily stats materialized", date=yesterday, win_rate=win_rate)

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Polymarket Bot{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .badge-paper { @apply bg-blue-100 text-blue-800; }
+    .badge-live  { @apply bg-red-100 text-red-800; }
+    .badge-win   { @apply bg-green-100 text-green-800; }
+    .badge-loss  { @apply bg-red-100 text-red-800; }
+    .badge-pending { @apply bg-yellow-100 text-yellow-800; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-900 min-h-screen">
+
+<nav class="bg-white border-b border-gray-200 px-6 py-3 flex items-center gap-6">
+  <span class="font-bold text-lg tracking-tight">Polymarket Bot</span>
+  <a href="/" class="text-sm text-gray-600 hover:text-gray-900">Dashboard</a>
+  <a href="/markets" class="text-sm text-gray-600 hover:text-gray-900">Markets</a>
+  <a href="/bets" class="text-sm text-gray-600 hover:text-gray-900">Bets</a>
+  <a href="/analytics" class="text-sm text-gray-600 hover:text-gray-900">Analytics</a>
+  <a href="/backtest" class="text-sm text-gray-600 hover:text-gray-900">Backtest</a>
+  <a href="/logs" class="text-sm text-gray-600 hover:text-gray-900">Logs</a>
+</nav>
+
+<main class="max-w-7xl mx-auto px-6 py-8">
+  {% block content %}{% endblock %}
+</main>
+
+<script>
+  // Auto-refresh summary data every 60 seconds
+  async function refreshSummary() {
+    try {
+      const r = await fetch('/api/summary');
+      const d = await r.json();
+      const el = document.getElementById('live-pnl');
+      if (el) el.textContent = '$' + d.total_pnl.toFixed(2);
+    } catch (e) { /* ignore */ }
+  }
+  setInterval(refreshSummary, 60000);
+</script>
+</body>
+</html>
