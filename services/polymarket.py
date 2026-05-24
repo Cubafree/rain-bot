@@ -7,7 +7,7 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, field_validator
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential_jitter,
     before_sleep_log,
@@ -18,6 +18,14 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE = "https://clob.polymarket.com"
 
 _log = logging.getLogger(__name__)
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, (httpx.TransportError, httpx.TimeoutException)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+        return True
+    return False
 
 
 class GammaMarket(BaseModel):
@@ -66,16 +74,16 @@ class GammaMarket(BaseModel):
 
 
 @retry(
-    retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException)),
-    stop=stop_after_attempt(4),
-    wait=wait_exponential_jitter(initial=1, max=30, jitter=2),
+    retry=retry_if_exception(_is_retryable),
+    stop=stop_after_attempt(5),
+    wait=wait_exponential_jitter(initial=5, max=60, jitter=5),
     before_sleep=before_sleep_log(_log, logging.WARNING),
     reraise=True,
 )
 async def _get(client: httpx.AsyncClient, url: str, **params) -> Any:
     resp = await client.get(url, params=params, timeout=20)
     if resp.status_code == 429:
-        logger.warning("Polymarket rate limited, backing off")
+        logger.warning("Polymarket rate limited, will retry")
         raise httpx.HTTPStatusError("429", request=resp.request, response=resp)
     resp.raise_for_status()
     return resp.json()
@@ -109,6 +117,7 @@ async def get_open_markets(category: str = "weather") -> list[GammaMarket]:
 
 async def get_resolved_markets(category: str = "weather", days: int = 180) -> list[GammaMarket]:
     """Fetch resolved markets for backtesting."""
+    import asyncio
     from datetime import timedelta, timezone
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
@@ -129,6 +138,7 @@ async def get_resolved_markets(category: str = "weather", days: int = 180) -> li
             except Exception as e:
                 logger.error(f"Failed to fetch resolved markets: {e}")
                 break
+            await asyncio.sleep(1.0)  # avoid rate limiting between pages
 
             raw_list = data if isinstance(data, list) else data.get("markets", [])
             if not raw_list:
