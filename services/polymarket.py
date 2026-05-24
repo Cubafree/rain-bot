@@ -40,6 +40,7 @@ class GammaMarket(BaseModel):
     active: bool = True
     tags: list[dict] = []
     conditionId: str | None = None
+    clobTokenIds: list[str] = []
 
     @field_validator("outcomePrices", mode="before")
     @classmethod
@@ -210,23 +211,27 @@ async def get_resolved_markets(category: str = "weather", days: int = 180) -> li
 
 
 async def get_price_at_time(
-    condition_id: str,
+    token_id: str,
     timestamp: datetime,
     interval: str = "1h",
 ) -> float | None:
-    """Fetch historical market price closest to a given timestamp."""
+    """Fetch historical YES price closest to a given timestamp.
+
+    token_id must be the CLOB token ID (numeric string from clobTokenIds[0]),
+    NOT the hex conditionId — the CLOB /prices-history endpoint uses token IDs.
+    """
     async with httpx.AsyncClient() as client:
         try:
             data = await _get(
                 client,
                 f"{CLOB_BASE}/prices-history",
-                market=condition_id,
+                market=token_id,
                 interval=interval,
                 startTs=int(timestamp.timestamp()),
                 endTs=int(timestamp.timestamp()) + 3600,
             )
         except Exception as e:
-            logger.warning("Failed to fetch price history", error=str(e), condition_id=condition_id)
+            logger.warning("Failed to fetch price history", error=str(e), token_id=token_id)
             return None
 
     history = data.get("history", [])

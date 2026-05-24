@@ -93,6 +93,7 @@ async def get_historical_forecast(
     longitude: float,
     threshold: float | None = None,
     threshold_unit: str = "F",
+    hours_ahead_override: float | None = None,
 ) -> WeatherSummary | None:
     """Return what GFS forecast said on as_of_date for target_date (backtesting)."""
     cache_key = f"hf:{station}:{target_date.isoformat()}:{as_of_date.isoformat()}"
@@ -119,7 +120,7 @@ async def get_historical_forecast(
             logger.error("Historical forecast failed", station=station, error=str(e))
             return None
 
-    summary = _build_summary(data, station, target_date, threshold, threshold_unit)
+    summary = _build_summary(data, station, target_date, threshold, threshold_unit, hours_ahead_override)
     async with _cache_lock:
         _cache[cache_key] = summary
     return summary
@@ -171,6 +172,7 @@ def _build_summary(
     target_date: date,
     threshold: float | None,
     threshold_unit: str,
+    hours_ahead_override: float | None = None,
 ) -> WeatherSummary:
     daily = data.get("daily", {})
     max_temps: list[float | None] = daily.get("temperature_2m_max", [])
@@ -192,10 +194,12 @@ def _build_summary(
         pct_above = sum(1 for t in valid_max if t > threshold) / len(valid_max)
         pct_below = 1.0 - pct_above
 
-    hours_ahead = None
-    now_utc = datetime.utcnow()
-    target_dt = datetime(target_date.year, target_date.month, target_date.day)
-    hours_ahead = max(0.0, (target_dt - now_utc).total_seconds() / 3600)
+    if hours_ahead_override is not None:
+        hours_ahead = hours_ahead_override
+    else:
+        now_utc = datetime.utcnow()
+        target_dt = datetime(target_date.year, target_date.month, target_date.day)
+        hours_ahead = max(0.0, (target_dt - now_utc).total_seconds() / 3600)
 
     return WeatherSummary(
         station=station,
