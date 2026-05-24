@@ -69,7 +69,6 @@ async def get_forecast(
         "models": "gfs_seamless",
         "start_date": target_date.isoformat(),
         "end_date": target_date.isoformat(),
-        "forecast_days": 16,
     }
 
     async with httpx.AsyncClient() as client:

@@ -51,6 +51,11 @@ CITY_STATIONS: dict[str, str] = {
     "Madrid": "LEMD",
     "Rome": "LIRF",
     "Istanbul": "LTBA",
+    # Polymarket name variants and missing cities
+    "New York City": "KLGA",
+    "NYC": "KLGA",
+    "Munich": "EDDM",
+    "Panama City": "MPMM",
     # China (active on Polymarket)
     "Zhengzhou": "ZHCC",
     "Beijing": "ZBAA",
@@ -134,6 +139,8 @@ STATION_COORDS: dict[str, tuple[float, float]] = {
     "LEMD": (40.472, -3.561),
     "LIRF": (41.800, 12.239),
     "LTBA": (40.976, 28.815),
+    "EDDM": (48.354, 11.786),
+    "MPMM": (9.071, -79.383),
     # China
     "ZHCC": (34.519, 113.841),
     "ZBAA": (40.080, 116.585),
