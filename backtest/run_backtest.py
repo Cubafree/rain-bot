@@ -77,6 +77,8 @@ async def run_backtest(
     for i, gm in enumerate(resolved_markets[:3]):
         logger.info(f"Sample market[{i}] question: {gm.question[:120]!r}  clobTokenIds={gm.clobTokenIds!r}")
 
+    # ── Phase 1: parse (in-memory, fast) ────────────────────────────────────
+    viable: list[tuple] = []
     for gm in resolved_markets:
         parsed = parse_market(gm.question)
         if parsed.parse_confidence < 0.8 or parsed.station is None:
@@ -90,12 +92,24 @@ async def run_backtest(
         if parsed.target_date is None or parsed.latitude is None:
             results["skip_parse"] += 1
             continue
+        viable.append((gm, parsed))
 
-        as_of_date = parsed.target_date - timedelta(days=1)
+    logger.info(f"After parse: {len(viable)} viable / {len(resolved_markets)} total")
 
-        # Fetch historical CLOB price first — if unavailable, skip before weather API call
-        signal_price, hours_ahead = await _get_signal_price(gm)
-        if signal_price is None:
+    # ── Phase 2: parallel CLOB price fetch (up to 20 concurrent) ────────────
+    _price_sem = asyncio.Semaphore(20)
+
+    async def _fetch_price_bounded(gm):
+        async with _price_sem:
+            return await _get_signal_price(gm)
+
+    logger.info("Fetching CLOB prices in parallel...")
+    price_results = await asyncio.gather(*[_fetch_price_bounded(gm) for gm, _ in viable])
+
+    # ── Phase 3: filter, then parallel weather fetch (up to 10 concurrent) ──
+    with_price = []
+    for (gm, parsed), (price, hours) in zip(viable, price_results):
+        if price is None:
             if results["skip_price"] == 0:
                 logger.warning(
                     f"First skip_price: clobTokenIds={gm.clobTokenIds!r} "
@@ -103,29 +117,51 @@ async def run_backtest(
                 )
             results["skip_price"] += 1
             continue
+        if price <= 0.01 or price >= 0.99:
+            results["skip_resolved"] += 1
+            continue
+        as_of_date = parsed.target_date - timedelta(days=1)
+        with_price.append((gm, parsed, as_of_date, price, hours))
 
-        forecast = await _get_cached_forecast(
-            parsed.station,
-            parsed.target_date,
-            as_of_date,
-            parsed.latitude,
-            parsed.longitude,
-            parsed.threshold,
-            parsed.unit or "F",
-            hours_ahead_override=hours_ahead,
-        )
+    logger.info(f"With CLOB price: {len(with_price)}, fetching weather in parallel...")
+
+    _forecast_sem = asyncio.Semaphore(10)
+
+    async def _fetch_forecast_bounded(item):
+        gm, parsed, as_of_date, price, hours = item
+        async with _forecast_sem:
+            return await _get_cached_forecast(
+                parsed.station,
+                parsed.target_date,
+                as_of_date,
+                parsed.latitude,
+                parsed.longitude,
+                parsed.threshold,
+                parsed.unit or "F",
+                hours_ahead_override=hours,
+            )
+
+    forecast_results = await asyncio.gather(*[_fetch_forecast_bounded(item) for item in with_price])
+
+    ready = []
+    for item, forecast in zip(with_price, forecast_results):
+        gm, parsed, as_of_date, price, hours = item
         if forecast is None:
             results["skip_forecast"] += 1
             continue
+        ready.append((gm, parsed, price, forecast))
 
-        # Skip prices too close to 0/1 — 0 causes division by zero, 1 gives 0 edge
-        if signal_price <= 0.01 or signal_price >= 0.99:
-            results["skip_resolved"] += 1
-            continue
+    logger.info(f"Ready for LLM: {len(ready)} markets × {len(strategies)} strategies")
 
+    # ── Phase 4: sequential LLM + DB writes ─────────────────────────────────
+    limit_reached = False
+    for gm, parsed, signal_price, forecast in ready:
+        if limit_reached:
+            break
         for strategy in strategies:
             if not dry_run and llm_calls >= max_llm_calls:
                 logger.warning("LLM call limit reached, stopping")
+                limit_reached = True
                 break
 
             if dry_run:
@@ -144,7 +180,6 @@ async def run_backtest(
                     station=parsed.station,
                 )
                 llm_calls += 1
-                # ~30 req/min — stays well within OpenRouter rate limits
                 await asyncio.sleep(2.0)
 
             if signal_result.signal is None or signal_result.signal.direction is None:
@@ -196,7 +231,6 @@ async def run_backtest(
                     continue
 
                 # Skip if a backtest signal already exists for this market+strategy
-                # (prevents UniqueViolation on re-runs)
                 existing_signal_r = await db.execute(
                     select(Signal.id).where(
                         Signal.market_id == market.id,
