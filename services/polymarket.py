@@ -90,28 +90,54 @@ async def _get(client: httpx.AsyncClient, url: str, **params) -> Any:
 
 
 async def get_open_markets(category: str = "weather") -> list[GammaMarket]:
-    """Fetch open prediction markets filtered by category tag."""
-    async with httpx.AsyncClient() as client:
-        try:
-            data = await _get(
-                client,
-                f"{GAMMA_BASE}/markets",
-                tag=category,
-                closed="false",
-                active="true",
-                limit=200,
-            )
-        except Exception as e:
-            logger.error(f"Failed to fetch open markets: {e}")
-            return []
+    """Fetch open prediction markets filtered by category tag via /events endpoint."""
+    import asyncio
 
-    markets = []
-    raw_list = data if isinstance(data, list) else data.get("markets", [])
-    for item in raw_list:
-        try:
-            markets.append(GammaMarket.model_validate(item))
-        except Exception as e:
-            logger.warning("Failed to parse market", error=str(e), item=item.get("id"))
+    markets: list[GammaMarket] = []
+    offset = 0
+    limit = 100
+
+    async with httpx.AsyncClient() as client:
+        while True:
+            try:
+                events = await _get(
+                    client,
+                    f"{GAMMA_BASE}/events",
+                    closed="false",
+                    active="true",
+                    tag_slug=category,
+                    order="endDate",
+                    ascending="true",
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as e:
+                logger.error(f"Failed to fetch open weather events: {e}")
+                break
+
+            if not isinstance(events, list) or not events:
+                break
+
+            for event in events:
+                tags = event.get("tags", [])
+                event_title = event.get("title", "")
+                for mkt in event.get("markets", []):
+                    item = dict(mkt)
+                    item.setdefault("tags", tags)
+                    item["endDateIso"] = mkt.get("endDate") or event.get("endDate")
+                    mkt_q = mkt.get("question", "")
+                    item["question"] = f"{event_title} {mkt_q}".strip() if event_title else mkt_q
+                    try:
+                        markets.append(GammaMarket.model_validate(item))
+                    except Exception:
+                        pass
+
+            await asyncio.sleep(0.3)
+            if len(events) < limit:
+                break
+            offset += limit
+
+    logger.info(f"Fetched {len(markets)} open weather markets")
     return markets
 
 

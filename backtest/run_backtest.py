@@ -102,6 +102,10 @@ async def run_backtest(
             # Approximate market price at signal time (24h before close)
             signal_price = gm.yes_price
 
+            # Skip fully-resolved prices — 0.0 causes division by zero, 1.0 gives 0 edge
+            if signal_price <= 0.01 or signal_price >= 0.99:
+                continue
+
             if dry_run:
                 import random
                 signal_result = _fake_signal(signal_price)
