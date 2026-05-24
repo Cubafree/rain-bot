@@ -45,8 +45,7 @@ async def index(request: Request, _: Auth, db: DB):
         )
     ).scalar_one()
 
-    return templates.TemplateResponse("index.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "index.html", {
         "mode": mode,
         "total_pnl": total_pnl,
         "starting_balance": settings.paper_starting_balance_usd,
@@ -77,8 +76,7 @@ async def markets(request: Request, _: Auth, db: DB):
         )
     ).all()
 
-    return templates.TemplateResponse("markets.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "markets.html", {
         "markets": active_markets,
         "signals": latest_signals,
     })
@@ -108,8 +106,7 @@ async def bets_page(
     bets_rows = (await db.execute(q)).all()
     strategies = (await db.execute(select(Strategy).order_by(Strategy.code))).scalars().all()
 
-    return templates.TemplateResponse("bets.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "bets.html", {
         "bets": bets_rows,
         "strategies": strategies,
         "selected_strategy": strategy_id,
@@ -143,8 +140,7 @@ async def analytics(request: Request, _: Auth, db: DB):
         )
     ).scalars().all()
 
-    return templates.TemplateResponse("analytics.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "analytics.html", {
         "strategy_stats": strategy_stats,
         "daily_stats": daily_stats,
         "mode": mode,
@@ -170,8 +166,7 @@ async def backtest_page(request: Request, _: Auth, db: DB):
         )
     ).all()
 
-    return templates.TemplateResponse("backtest.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "backtest.html", {
         "strategies": strategies,
         "bets": backtest_bets,
     })
@@ -185,8 +180,7 @@ async def logs_page(request: Request, _: Auth, db: DB, limit: int = 50):
         )
     ).scalars().all()
 
-    return templates.TemplateResponse("logs.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "logs.html", {
         "logs": cycle_logs,
     })
 
