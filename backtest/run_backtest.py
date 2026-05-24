@@ -68,15 +68,25 @@ async def run_backtest(
             )
 
     llm_calls = 0
-    results = {"wins": 0, "losses": 0, "total_pnl": 0.0, "skipped": 0}
+    results = {
+        "wins": 0, "losses": 0, "total_pnl": 0.0,
+        "skip_parse": 0, "skip_forecast": 0, "skip_price": 0, "skip_resolved": 0,
+    }
 
     for gm in resolved_markets:
         parsed = parse_market(gm.question)
         if parsed.parse_confidence < 0.8 or parsed.station is None:
-            results["skipped"] += 1
+            results["skip_parse"] += 1
+            logger.debug(
+                "Skip: parse failed",
+                q=gm.question[:80],
+                conf=parsed.parse_confidence,
+                city=parsed.city,
+                station=parsed.station,
+            )
             continue
         if parsed.target_date is None or parsed.latitude is None:
-            results["skipped"] += 1
+            results["skip_parse"] += 1
             continue
 
         as_of_date = parsed.target_date - timedelta(days=1)
@@ -92,24 +102,26 @@ async def run_backtest(
             hours_ahead_override=24.0,  # simulate bet placed 24h before close
         )
         if forecast is None:
-            results["skipped"] += 1
+            results["skip_forecast"] += 1
             continue
 
         # Fetch historical CLOB price at signal time (24h before market close).
         # gm.yes_price is the final resolved price (0 or 1) — not useful for entry.
+        logger.debug(
+            "CLOB lookup",
+            market_id=gm.id,
+            clobTokenIds=gm.clobTokenIds,
+            conditionId=gm.conditionId,
+            endDateIso=str(gm.endDateIso),
+        )
         signal_price = await _get_signal_price(gm)
         if signal_price is None:
-            logger.debug(
-                "Skipping market — no historical price available",
-                market_id=gm.id,
-                question=gm.question[:60],
-            )
-            results["skipped"] += 1
+            results["skip_price"] += 1
             continue
 
         # Skip prices too close to 0/1 — 0 causes division by zero, 1 gives 0 edge
         if signal_price <= 0.01 or signal_price >= 0.99:
-            results["skipped"] += 1
+            results["skip_resolved"] += 1
             continue
 
         for strategy in strategies:
@@ -239,7 +251,10 @@ async def run_backtest(
         losses=results["losses"],
         win_rate=f"{win_rate:.1%}",
         total_pnl=f"${results['total_pnl']:.2f}",
-        skipped=results["skipped"],
+        skip_parse=results["skip_parse"],
+        skip_forecast=results["skip_forecast"],
+        skip_price=results["skip_price"],
+        skip_resolved=results["skip_resolved"],
         llm_calls=llm_calls,
     )
 
