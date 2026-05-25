@@ -16,7 +16,9 @@ class Settings(BaseSettings):
     # OpenRouter
     openrouter_api_key: str = Field(..., min_length=10)
     openrouter_model: str = "deepseek/deepseek-r1"
-    openrouter_fallback_model: str = "meta-llama/llama-3.1-8b-instruct:free"
+    openrouter_fallback_model: str = "openai/gpt-4o-mini"
+    # Faster model used during backtesting (no chain-of-thought needed)
+    openrouter_backtest_model: str = "deepseek/deepseek-chat"
 
     # Polymarket (live only)
     polymarket_private_key: str | None = None

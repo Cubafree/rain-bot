@@ -133,8 +133,12 @@ async def analyze(
     strategy_params: dict,
     forecast: WeatherSummary,
     station: str,
+    model: str | None = None,
 ) -> AnalysisResult:
-    """Run LLM analysis for a single market+strategy pair."""
+    """Run LLM analysis for a single market+strategy pair.
+
+    Pass ``model`` to override the default (e.g. use a faster model for backtesting).
+    """
     strategy_extra = _build_strategy_extra(strategy_code, strategy_params, forecast)
 
     prompt = WEATHER_ANALYSIS_PROMPT.format(
@@ -158,7 +162,7 @@ async def analyze(
         strategy_extra=strategy_extra,
     )
 
-    model = settings.openrouter_model
+    model = model or settings.openrouter_model
     async with _sem:
         async with httpx.AsyncClient() as client:
             try:

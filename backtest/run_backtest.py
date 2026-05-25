@@ -153,44 +153,52 @@ async def run_backtest(
 
     logger.info(f"Ready for LLM: {len(ready)} markets × {len(strategies)} strategies")
 
-    # ── Phase 4: sequential LLM + DB writes ─────────────────────────────────
-    limit_reached = False
+    # ── Phase 4: parallel LLM + sequential DB writes ────────────────────────
+    # Use fast backtest model (deepseek-chat ~5s vs R1 ~60s) — same answer quality.
+    backtest_model = settings.openrouter_backtest_model
+    logger.info(f"Phase 4: LLM model={backtest_model} max_calls={max_llm_calls}")
+
+    # Build flat list of (market, strategy) pairs, capped at max_llm_calls
+    all_pairs = [
+        (gm, parsed, signal_price, forecast, strategy)
+        for gm, parsed, signal_price, forecast in ready
+        for strategy in strategies
+    ]
+    if not dry_run:
+        all_pairs = all_pairs[:max_llm_calls]
+
     skips = {"no_signal": 0, "low_confidence": 0, "low_edge": 0}
-    for gm, parsed, signal_price, forecast in ready:
-        if limit_reached:
-            break
-        for strategy in strategies:
-            if not dry_run and llm_calls >= max_llm_calls:
-                logger.warning("LLM call limit reached, stopping")
-                limit_reached = True
-                break
 
-            if dry_run:
-                import random
-                signal_result = _fake_signal(signal_price)
-            else:
-                if llm_calls == 0:
-                    logger.info("Phase 4: making first LLM call", question=gm.question[:60], strategy=strategy.code)
-                signal_result = await analyzer.analyze(
-                    question=gm.question,
-                    yes_price=signal_price,
-                    no_price=1 - signal_price,
-                    strategy_code=strategy.code,
-                    strategy_name=strategy.name,
-                    strategy_description=strategy.description or "",
-                    strategy_params=strategy.params or {},
-                    forecast=forecast,
-                    station=parsed.station,
-                )
-                llm_calls += 1
-                if llm_calls % 10 == 0:
-                    logger.info(
-                        f"LLM progress: {llm_calls}/{max_llm_calls} calls | "
-                        f"bets={results['wins']+results['losses']} pnl=${results['total_pnl']:.2f} | "
-                        f"skips: no_signal={skips['no_signal']} conf={skips['low_confidence']} edge={skips['low_edge']}"
-                    )
-                await asyncio.sleep(0.5)  # reduced from 2.0 — enough to avoid burst rate-limiting
+    async def _llm_one(gm, parsed, signal_price, forecast, strategy):
+        if dry_run:
+            return (gm, parsed, signal_price, forecast, strategy, _fake_signal(signal_price))
+        result = await analyzer.analyze(
+            question=gm.question,
+            yes_price=signal_price,
+            no_price=1 - signal_price,
+            strategy_code=strategy.code,
+            strategy_name=strategy.name,
+            strategy_description=strategy.description or "",
+            strategy_params=strategy.params or {},
+            forecast=forecast,
+            station=parsed.station,
+            model=backtest_model,
+        )
+        return (gm, parsed, signal_price, forecast, strategy, result)
 
+    # Process in batches of 9 (3 concurrent × manageable DB load)
+    BATCH = 9
+    for batch_start in range(0, len(all_pairs), BATCH):
+        batch = all_pairs[batch_start:batch_start + BATCH]
+        batch_results = await asyncio.gather(*[_llm_one(*p) for p in batch])
+        llm_calls += len(batch)
+        logger.info(
+            f"LLM progress: {llm_calls}/{len(all_pairs)} | "
+            f"bets={results['wins']+results['losses']} pnl=${results['total_pnl']:.2f} | "
+            f"skips: no_signal={skips['no_signal']} conf={skips['low_confidence']} edge={skips['low_edge']}"
+        )
+
+        for gm, parsed, signal_price, forecast, strategy, signal_result in batch_results:
             if signal_result.signal is None or signal_result.signal.direction is None:
                 skips["no_signal"] += 1
                 continue
