@@ -155,6 +155,7 @@ async def run_backtest(
 
     # ── Phase 4: sequential LLM + DB writes ─────────────────────────────────
     limit_reached = False
+    skips = {"no_signal": 0, "low_confidence": 0, "low_edge": 0}
     for gm, parsed, signal_price, forecast in ready:
         if limit_reached:
             break
@@ -168,6 +169,8 @@ async def run_backtest(
                 import random
                 signal_result = _fake_signal(signal_price)
             else:
+                if llm_calls == 0:
+                    logger.info("Phase 4: making first LLM call", question=gm.question[:60], strategy=strategy.code)
                 signal_result = await analyzer.analyze(
                     question=gm.question,
                     yes_price=signal_price,
@@ -180,13 +183,22 @@ async def run_backtest(
                     station=parsed.station,
                 )
                 llm_calls += 1
-                await asyncio.sleep(2.0)
+                if llm_calls % 10 == 0:
+                    logger.info(
+                        f"LLM progress: {llm_calls}/{max_llm_calls} calls | "
+                        f"bets={results['wins']+results['losses']} pnl=${results['total_pnl']:.2f} | "
+                        f"skips: no_signal={skips['no_signal']} conf={skips['low_confidence']} edge={skips['low_edge']}"
+                    )
+                await asyncio.sleep(0.5)  # reduced from 2.0 — enough to avoid burst rate-limiting
 
             if signal_result.signal is None or signal_result.signal.direction is None:
+                skips["no_signal"] += 1
                 continue
             if signal_result.signal.confidence != settings.min_confidence:
+                skips["low_confidence"] += 1
                 continue
             if abs(signal_result.signal.edge) < settings.min_edge:
+                skips["low_edge"] += 1
                 continue
 
             # Determine actual outcome (YES won = price resolved to 1.0)
@@ -281,7 +293,8 @@ async def run_backtest(
         f"Backtest complete — bets={total} wins={results['wins']} losses={results['losses']} "
         f"pnl=${results['total_pnl']:.2f} win_rate={win_rate:.1%} llm_calls={llm_calls} | "
         f"skips: parse={results['skip_parse']} forecast={results['skip_forecast']} "
-        f"price={results['skip_price']} resolved={results['skip_resolved']}"
+        f"price={results['skip_price']} resolved={results['skip_resolved']} | "
+        f"llm_skips: no_signal={skips['no_signal']} conf={skips['low_confidence']} edge={skips['low_edge']}"
     )
 
 
