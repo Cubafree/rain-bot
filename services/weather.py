@@ -7,7 +7,7 @@ import httpx
 from cachetools import TTLCache
 from loguru import logger
 from pydantic import BaseModel, ConfigDict
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
@@ -34,14 +34,22 @@ class WeatherSummary(BaseModel):
     hours_ahead: float | None = None
 
 
+def _is_retryable_weather(exc: BaseException) -> bool:
+    if isinstance(exc, (httpx.TransportError, httpx.TimeoutException)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (429, 500, 502, 503):
+        return True
+    return False
+
+
 @retry(
-    retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException)),
+    retry=retry_if_exception(_is_retryable_weather),
     stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1, min=2, max=30),
+    wait=wait_exponential(multiplier=2, min=4, max=60),
     reraise=True,
 )
 async def _fetch(client: httpx.AsyncClient, url: str, params: dict) -> dict:
-    resp = await client.get(url, params=params, timeout=25)
+    resp = await client.get(url, params=params, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
@@ -94,30 +102,63 @@ async def get_historical_forecast(
     threshold_unit: str = "F",
     hours_ahead_override: float | None = None,
 ) -> WeatherSummary | None:
-    """Return what GFS forecast said on as_of_date for target_date (backtesting)."""
+    """Return forecast/archive data for target_date (backtesting).
+
+    Tries the Historical Forecast API first (returns what GFS predicted at as_of_date).
+    Falls back to the ERA5 Archive API (actual observations) when that endpoint fails
+    — which it will on the free Open-Meteo tier.
+    """
     cache_key = f"hf:{station}:{target_date.isoformat()}:{as_of_date.isoformat()}"
     async with _cache_lock:
         if cache_key in _cache:
             return _cache[cache_key]
 
-    params = {
+    base_params = {
         "latitude": latitude,
         "longitude": longitude,
         "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum",
         "temperature_unit": "fahrenheit",
         "precipitation_unit": "mm",
         "timezone": "UTC",
-        "models": "gfs_seamless",
         "start_date": target_date.isoformat(),
         "end_date": target_date.isoformat(),
     }
 
+    data: dict | None = None
     async with httpx.AsyncClient() as client:
+        # 1st attempt: Historical Forecast API (premium endpoint, archived GFS runs)
         try:
+            params = {**base_params, "models": "gfs_seamless"}
             data = await _fetch(client, HISTORICAL_FORECAST_URL, params)
+        except httpx.HTTPStatusError as e:
+            logger.warning(
+                "Historical forecast API error — falling back to archive",
+                station=station,
+                status=e.response.status_code,
+                body=e.response.text[:300],
+            )
         except Exception as e:
-            logger.error("Historical forecast failed", station=station, error=str(e))
-            return None
+            logger.warning(
+                "Historical forecast API unavailable — falling back to archive",
+                station=station,
+                error=repr(e),
+            )
+
+        # 2nd attempt: ERA5 Archive API (actual observations, always free)
+        if data is None:
+            try:
+                data = await _fetch(client, HISTORICAL_WEATHER_URL, base_params)
+            except httpx.HTTPStatusError as e:
+                logger.error(
+                    "Archive weather API error",
+                    station=station,
+                    status=e.response.status_code,
+                    body=e.response.text[:300],
+                )
+                return None
+            except Exception as e:
+                logger.error("Archive weather API failed", station=station, error=repr(e))
+                return None
 
     summary = _build_summary(data, station, target_date, threshold, threshold_unit, hours_ahead_override)
     async with _cache_lock:

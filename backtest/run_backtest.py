@@ -125,7 +125,7 @@ async def run_backtest(
 
     logger.info(f"With CLOB price: {len(with_price)}, fetching weather in parallel...")
 
-    _forecast_sem = asyncio.Semaphore(10)
+    _forecast_sem = asyncio.Semaphore(5)
 
     async def _fetch_forecast_bounded(item):
         gm, parsed, as_of_date, price, hours = item
@@ -285,6 +285,9 @@ async def run_backtest(
     )
 
 
+_WEATHER_MISS = "WEATHER_MISS"
+
+
 async def _get_cached_forecast(
     station: str,
     target_date: date,
@@ -297,6 +300,8 @@ async def _get_cached_forecast(
 ):
     key = f"hf:{station}:{target_date.isoformat()}:{as_of_date.isoformat()}"
     cached = CACHE.get(key)
+    if cached == _WEATHER_MISS:
+        return None
     if cached is not None:
         return cached
 
@@ -312,6 +317,9 @@ async def _get_cached_forecast(
     )
     if result is not None:
         CACHE.set(key, result, expire=86400 * 30)
+    else:
+        # Cache the miss for 24h so we don't hammer Open-Meteo on reruns
+        CACHE.set(key, _WEATHER_MISS, expire=86400)
     return result
 
 
