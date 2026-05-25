@@ -1,7 +1,7 @@
 from datetime import datetime, date
 from sqlalchemy import (
     Boolean, Column, Date, DateTime, ForeignKey, Integer,
-    Numeric, String, Text, UniqueConstraint, CheckConstraint, Index,
+    Numeric, SmallInteger, String, Text, UniqueConstraint, CheckConstraint, Index,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -136,6 +136,18 @@ class CycleLog(Base):
     __table_args__ = (
         Index("idx_cycle_logs_started_at", "started_at"),
     )
+
+
+class StationBias(Base):
+    __tablename__ = "station_bias"
+
+    station = Column(String(10), primary_key=True)
+    month = Column(SmallInteger, primary_key=True)
+    bias_f = Column(Numeric(4, 2), nullable=False, server_default="0")
+    rmse_f = Column(Numeric(4, 2), nullable=False, server_default="2.5")
+    sample_count = Column(Integer, server_default="0")
+    source = Column(String(50))
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class DailyStats(Base):

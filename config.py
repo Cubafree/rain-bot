@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     polymarket_private_key: str | None = None
     polymarket_proxy_address: str | None = None
 
+    # Market filters
+    min_market_volume_usd: float = Field(10000.0)
+    max_model_agreement_delta_f: float = Field(3.0, ge=0.5, le=10.0)
+    llm_bypass_pct_threshold: float = Field(0.85, ge=0.70, le=0.99)
+
     # Trading
     trading_mode: Literal["paper", "live"] = "paper"
     max_bet_usd: float = Field(5.0, ge=0.1, le=100.0)
@@ -49,6 +54,9 @@ class Settings(BaseSettings):
     # Dashboard
     dashboard_user: str = "admin"
     dashboard_password: str = Field("changeme", min_length=8)
+
+    # Bias calibration (Visual Crossing — free tier, one-time script only)
+    visualcrossing_api_key: str | None = None
 
     # Alerting
     alert_webhook_url: str | None = None

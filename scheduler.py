@@ -142,6 +142,10 @@ async def _process_market(
     strategies: list[Strategy],
     cycle_log: CycleLog,
 ) -> None:
+    if hasattr(gm, 'volume') and gm.volume is not None and gm.volume < settings.min_market_volume_usd:
+        logger.debug("Market skipped (volume too low)", question=gm.question[:80], volume=gm.volume)
+        return
+
     parsed = parse_market(gm.question)
 
     if parsed.parse_confidence < 0.8 or parsed.station is None:

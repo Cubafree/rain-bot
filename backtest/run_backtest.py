@@ -19,7 +19,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from config import settings
-from db.models import Bet, Market, Signal, Strategy
+from db.models import Bet, Market, Signal, Strategy, StationBias
 from db.session import db_session
 from services import analyzer, polymarket, weather
 from services.event_router import parse_market
@@ -70,7 +70,7 @@ async def run_backtest(
     llm_calls = 0
     results = {
         "wins": 0, "losses": 0, "total_pnl": 0.0,
-        "skip_parse": 0, "skip_forecast": 0, "skip_price": 0, "skip_resolved": 0,
+        "skip_parse": 0, "skip_volume": 0, "skip_forecast": 0, "skip_price": 0, "skip_resolved": 0,
     }
 
     # Log the first few questions so we can see what the parser is receiving
@@ -80,6 +80,9 @@ async def run_backtest(
     # ── Phase 1: parse (in-memory, fast) ────────────────────────────────────
     viable: list[tuple] = []
     for gm in resolved_markets:
+        if hasattr(gm, 'volume') and gm.volume is not None and gm.volume < settings.min_market_volume_usd:
+            results["skip_volume"] = results.get("skip_volume", 0) + 1
+            continue
         parsed = parse_market(gm.question)
         if parsed.parse_confidence < 0.8 or parsed.station is None:
             results["skip_parse"] += 1
@@ -106,7 +109,7 @@ async def run_backtest(
     logger.info("Fetching CLOB prices in parallel...")
     price_results = await asyncio.gather(*[_fetch_price_bounded(gm) for gm, _ in viable])
 
-    # ── Phase 3: filter, then parallel weather fetch (up to 10 concurrent) ──
+    # ── Phase 3: filter, load biases, then parallel weather fetch ────────────
     with_price = []
     for (gm, parsed), (price, hours) in zip(viable, price_results):
         if price is None:
@@ -123,12 +126,30 @@ async def run_backtest(
         as_of_date = parsed.target_date - timedelta(days=1)
         with_price.append((gm, parsed, as_of_date, price, hours))
 
+    # Load station biases once (station × month) to correct for GFS warm/cold bias
+    station_biases: dict[tuple, float] = {}
+    async with db_session() as db:
+        for _gm, parsed, _as_of, _price, _hours in with_price:
+            if parsed.target_date is None:
+                continue
+            key = (parsed.station, parsed.target_date.month)
+            if key not in station_biases:
+                r = await db.execute(
+                    select(StationBias).where(
+                        StationBias.station == parsed.station,
+                        StationBias.month == parsed.target_date.month,
+                    )
+                )
+                b = r.scalar_one_or_none()
+                station_biases[key] = float(b.bias_f) if b else 0.0
+
     logger.info(f"With CLOB price: {len(with_price)}, fetching weather in parallel...")
 
     _forecast_sem = asyncio.Semaphore(5)
 
     async def _fetch_forecast_bounded(item):
         gm, parsed, as_of_date, price, hours = item
+        bias = station_biases.get((parsed.station, parsed.target_date.month if parsed.target_date else 1), 0.0)
         async with _forecast_sem:
             return await _get_cached_forecast(
                 parsed.station,
@@ -139,6 +160,7 @@ async def run_backtest(
                 parsed.threshold,
                 parsed.unit or "F",
                 hours_ahead_override=hours,
+                bias_f=bias,
             )
 
     forecast_results = await asyncio.gather(*[_fetch_forecast_bounded(item) for item in with_price])
@@ -167,7 +189,7 @@ async def run_backtest(
     if not dry_run:
         all_pairs = all_pairs[:max_llm_calls]
 
-    skips = {"no_signal": 0, "low_confidence": 0, "low_edge": 0}
+    skips = {"no_signal": 0, "low_confidence": 0, "low_edge": 0, "model_disagree": 0}
 
     async def _llm_one(gm, parsed, signal_price, forecast, strategy):
         if dry_run:
@@ -195,12 +217,16 @@ async def run_backtest(
         logger.info(
             f"LLM progress: {llm_calls}/{len(all_pairs)} | "
             f"bets={results['wins']+results['losses']} pnl=${results['total_pnl']:.2f} | "
-            f"skips: no_signal={skips['no_signal']} conf={skips['low_confidence']} edge={skips['low_edge']}"
+            f"skips: no_signal={skips['no_signal']} conf={skips['low_confidence']} "
+            f"edge={skips['low_edge']} model_disagree={skips['model_disagree']}"
         )
 
         for gm, parsed, signal_price, forecast, strategy, signal_result in batch_results:
             if signal_result.signal is None or signal_result.signal.direction is None:
-                skips["no_signal"] += 1
+                if signal_result.raw_response == "model_disagreement":
+                    skips["model_disagree"] += 1
+                else:
+                    skips["no_signal"] += 1
                 continue
             if signal_result.signal.confidence != settings.min_confidence:
                 skips["low_confidence"] += 1
@@ -300,9 +326,10 @@ async def run_backtest(
     logger.info(
         f"Backtest complete — bets={total} wins={results['wins']} losses={results['losses']} "
         f"pnl=${results['total_pnl']:.2f} win_rate={win_rate:.1%} llm_calls={llm_calls} | "
-        f"skips: parse={results['skip_parse']} forecast={results['skip_forecast']} "
-        f"price={results['skip_price']} resolved={results['skip_resolved']} | "
-        f"llm_skips: no_signal={skips['no_signal']} conf={skips['low_confidence']} edge={skips['low_edge']}"
+        f"skips: parse={results['skip_parse']} volume={results['skip_volume']} "
+        f"forecast={results['skip_forecast']} price={results['skip_price']} resolved={results['skip_resolved']} | "
+        f"llm_skips: no_signal={skips['no_signal']} conf={skips['low_confidence']} "
+        f"edge={skips['low_edge']} model_disagree={skips['model_disagree']}"
     )
 
 
@@ -318,8 +345,10 @@ async def _get_cached_forecast(
     threshold: float | None,
     unit: str,
     hours_ahead_override: float | None = None,
+    bias_f: float = 0.0,
 ):
-    key = f"hf:{station}:{target_date.isoformat()}:{as_of_date.isoformat()}"
+    # Include bias in cache key so different bias values aren't served stale
+    key = f"hf:{station}:{target_date.isoformat()}:{as_of_date.isoformat()}:b{bias_f:.2f}"
     cached = CACHE.get(key)
     if cached == _WEATHER_MISS:
         return None
@@ -335,6 +364,7 @@ async def _get_cached_forecast(
         threshold=threshold,
         threshold_unit=unit,
         hours_ahead_override=hours_ahead_override,
+        bias_f=bias_f,
     )
     if result is not None:
         CACHE.set(key, result, expire=86400 * 30)

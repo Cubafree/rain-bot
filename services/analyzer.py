@@ -32,8 +32,10 @@ Current YES price: {yes_price} (market implies {yes_pct:.1f}% probability)
 Current NO price: {no_price}
 Strategy: {strategy_name} — {strategy_description}
 
-GFS Forecast for station {station} on {date}:
-- Mean max temperature: {mean_max_f}°F
+GFS/ECMWF Forecast for station {station} on {date}:
+- Mean max temperature (GFS/ECMWF blend): {mean_max_f}°F
+- ECMWF mean max: {ecmwf_mean_max_f}°F
+- GFS/ECMWF agreement: within {model_agreement_delta_f}°F
 - P10/P90 range: {p10_f}°F – {p90_f}°F
 - Ensemble members above threshold ({threshold}°F): {pct_above:.1%}
 - Ensemble members below threshold: {pct_below:.1%}
@@ -139,6 +141,19 @@ async def analyze(
 
     Pass ``model`` to override the default (e.g. use a faster model for backtesting).
     """
+    # Model agreement filter — skip LLM if GFS and ECMWF disagree too much
+    delta = forecast.model_agreement_delta_f
+    if delta is not None and delta > settings.max_model_agreement_delta_f:
+        logger.info("Models disagree, skipping signal", delta_f=delta, question=question[:60])
+        return AnalysisResult(signal=None, llm_model=model or settings.openrouter_model, tokens_used=0, raw_response="model_disagreement")
+
+    # LLM bypass for high-certainty ensemble signals
+    bypass = _try_bypass_signal(forecast, yes_price, settings.llm_bypass_pct_threshold, station)
+    if bypass is not None:
+        if bypass.signal:
+            _verify_edge(bypass.signal, yes_price, 1 - yes_price)
+        return bypass
+
     strategy_extra = _build_strategy_extra(strategy_code, strategy_params, forecast)
 
     prompt = WEATHER_ANALYSIS_PROMPT.format(
@@ -150,10 +165,12 @@ async def analyze(
         strategy_description=strategy_description,
         station=station,
         date=forecast.target_date,
-        mean_max_f=forecast.mean_max_f or "N/A",
-        p10_f=forecast.p10_max_f or "N/A",
-        p90_f=forecast.p90_max_f or "N/A",
-        threshold=forecast.threshold or "N/A",
+        mean_max_f=forecast.mean_max_f if forecast.mean_max_f is not None else "N/A",
+        ecmwf_mean_max_f=forecast.ecmwf_mean_max_f if forecast.ecmwf_mean_max_f is not None else "N/A",
+        model_agreement_delta_f=forecast.model_agreement_delta_f if forecast.model_agreement_delta_f is not None else "N/A",
+        p10_f=forecast.p10_max_f if forecast.p10_max_f is not None else "N/A",
+        p90_f=forecast.p90_max_f if forecast.p90_max_f is not None else "N/A",
+        threshold=forecast.threshold if forecast.threshold is not None else "N/A",
         pct_above=forecast.pct_above_threshold or 0.0,
         pct_below=forecast.pct_below_threshold or 0.0,
         precip_mm=forecast.precipitation_mm or 0.0,
@@ -198,6 +215,50 @@ async def health_check() -> bool:
             return resp.status_code == 200
         except Exception:
             return False
+
+
+def _try_bypass_signal(
+    forecast: WeatherSummary,
+    yes_price: float,
+    threshold: float,
+    station: str,
+) -> "AnalysisResult | None":
+    """Skip LLM when ensemble has overwhelming consensus. Returns None to proceed with LLM."""
+    pct = forecast.pct_above_threshold
+    if pct is None or forecast.members < 20:
+        return None
+
+    if pct >= threshold:
+        edge = round(pct - yes_price, 4)
+        if abs(edge) < settings.min_edge:
+            return None
+        signal = LLMSignal(
+            our_probability=round(pct, 4),
+            confidence="high",
+            direction="YES",
+            edge=edge,
+            reasoning=f"Bypass: {pct:.0%} ensemble above threshold, market at {yes_price:.2f}",
+            data_quality="sufficient",
+        )
+        return AnalysisResult(signal=signal, llm_model="bypass", tokens_used=0)
+
+    elif pct <= (1 - threshold):
+        no_prob = round(1 - pct, 4)
+        no_price_val = round(1 - yes_price, 4)
+        edge = round(no_prob - no_price_val, 4)
+        if abs(edge) < settings.min_edge:
+            return None
+        signal = LLMSignal(
+            our_probability=no_prob,
+            confidence="high",
+            direction="NO",
+            edge=edge,
+            reasoning=f"Bypass: only {pct:.0%} ensemble above threshold, market NO at {no_price_val:.2f}",
+            data_quality="sufficient",
+        )
+        return AnalysisResult(signal=signal, llm_model="bypass", tokens_used=0)
+
+    return None
 
 
 def _parse_llm_response(raw: str, yes_price: float, no_price: float) -> LLMSignal | None:
