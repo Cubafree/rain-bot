@@ -260,25 +260,28 @@ def _add_forecast_noise(summary: WeatherSummary, hours_ahead: float) -> WeatherS
 
     noise = random.gauss(0, sigma_f)
     mean_max = (summary.mean_max_f or 0) + noise
-    p10 = (summary.p10_max_f or 0) + noise
-    p90 = (summary.p90_max_f or 0) + noise
+    # P10/P90 represent the ±1.28σ bounds of the synthetic ensemble (80% range)
+    p10 = round(mean_max - 1.28 * sigma_f, 1)
+    p90 = round(mean_max + 1.28 * sigma_f, 1)
 
-    # Recompute pct_above using Normal CDF approximation
-    if summary.threshold is not None and summary.mean_max_f is not None:
-        spread = max(p90 - p10, 1.0) / 2.5  # approx sigma from P10/P90
-        z = (mean_max - summary.threshold) / max(spread, 0.5)
-        pct_above = 0.5 * (1 + math.erf(z / math.sqrt(2)))
-        pct_below = 1.0 - pct_above
+    # Recompute pct_above using Normal CDF with sigma_f as the spread.
+    # ERA5 is a single observation so p10==p90 before noise — deriving spread
+    # from p90-p10 gives 0, collapsing every z-score to ±∞ and pct_above to
+    # 0% or 100%.  Using sigma_f directly gives realistic intermediate values.
+    if summary.threshold is not None:
+        z = (mean_max - summary.threshold) / sigma_f
+        pct_above = round(0.5 * (1 + math.erf(z / math.sqrt(2))), 3)
+        pct_below = round(1.0 - pct_above, 3)
     else:
         pct_above = summary.pct_above_threshold
         pct_below = summary.pct_below_threshold
 
     return summary.model_copy(update={
         "mean_max_f": round(mean_max, 1),
-        "p10_max_f": round(p10, 1),
-        "p90_max_f": round(p90, 1),
-        "pct_above_threshold": round(pct_above, 3) if pct_above is not None else None,
-        "pct_below_threshold": round(pct_below, 3) if pct_below is not None else None,
+        "p10_max_f": p10,
+        "p90_max_f": p90,
+        "pct_above_threshold": pct_above,
+        "pct_below_threshold": pct_below,
         "data_source": "era5_with_noise",
     })
 
@@ -293,9 +296,10 @@ def _apply_bias(summary: WeatherSummary, bias_f: float) -> WeatherSummary:
 
     pct_above = summary.pct_above_threshold
     pct_below = summary.pct_below_threshold
-    if summary.threshold is not None:
-        spread = max(p90 - p10, 1.0) / 2.5
-        z = (mean_max - summary.threshold) / max(spread, 0.5)
+    if summary.threshold is not None and p90 > p10:
+        # Derive sigma from P10/P90 spread (valid after _add_forecast_noise set them)
+        sigma = (p90 - p10) / (2 * 1.28)
+        z = (mean_max - summary.threshold) / max(sigma, 0.5)
         pct_above = round(0.5 * (1 + math.erf(z / math.sqrt(2))), 3)
         pct_below = round(1.0 - pct_above, 3)
 
