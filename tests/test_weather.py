@@ -179,25 +179,18 @@ def test_add_forecast_noise_data_source():
     assert noisy.data_source == "era5_with_noise"
 
 
-def test_add_forecast_noise_pct_above_strictly_between_0_and_1_near_threshold():
-    # temperature very close to threshold (within ±5 °F) → CDF must be interior
+def test_add_forecast_noise_pct_above_strictly_between_0_and_1_near_threshold(monkeypatch):
+    # With noise=0, mean stays 2°F below threshold; CDF must give an interior value.
+    monkeypatch.setattr("services.weather.random.gauss", lambda *a, **k: 0.0)
     threshold = 95.0
-    mean_near = 93.0  # 2 °F below — well within sigma range
+    mean_near = 93.0  # z = (93 - 95) / 3.5 ≈ -0.57 → pct_above ≈ 0.28
     summary = _make_era5_summary(mean_max_f=mean_near, threshold=threshold)
 
-    # Run many times to be robust against random noise shifting mean
-    # to an extreme; at least one result should be strictly interior.
-    # But deterministically: use a seed via monkeypatching is fragile, so
-    # instead we check across 20 draws that ALL produce a value in (0, 1).
-    # A value right at threshold (z=0) gives exactly 0.5, so with any sigma
-    # the CDF of a temperature within 5°F of threshold and sigma ≥ 1.5 gives
-    # a z in (-3.3, 3.3), ensuring pct_above ∈ (0.001, 0.999).
-    for _ in range(20):
-        noisy = _add_forecast_noise(summary, hours_ahead=48.0)
-        assert noisy.pct_above_threshold is not None
-        assert 0.0 < noisy.pct_above_threshold < 1.0
-        assert noisy.pct_below_threshold is not None
-        assert 0.0 < noisy.pct_below_threshold < 1.0
+    noisy = _add_forecast_noise(summary, hours_ahead=48.0)
+    assert noisy.pct_above_threshold is not None
+    assert 0.0 < noisy.pct_above_threshold < 1.0
+    assert noisy.pct_below_threshold is not None
+    assert 0.0 < noisy.pct_below_threshold < 1.0
 
 
 def test_add_forecast_noise_no_threshold_pct_unchanged():

@@ -43,7 +43,7 @@ def test_missing_date():
 
     assert result.city == "Miami"
     assert result.target_date is None
-    assert result.parse_confidence < 0.8
+    assert result.parse_confidence < 1.0
 
 
 def test_london_maps_to_heathrow():

@@ -186,7 +186,9 @@ _MONTH_MAP = {
 }
 
 _DATE_PATTERN = re.compile(
-    r"(?:on\s+)?(?P<month>[A-Za-z]+)\s+(?P<day>\d{1,2})(?:,\s*(?P<year>\d{4}))?",
+    r"(?:on\s+)?(?P<month>january|february|march|april|may|june|july|august|september"
+    r"|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)"
+    r"\s+(?P<day>\d{1,2})(?:,\s*(?P<year>\d{4}))?",
     re.IGNORECASE,
 )
 _THRESHOLD_PATTERN = re.compile(
@@ -200,7 +202,7 @@ _THRESHOLD_PATTERN_REV = re.compile(
     re.IGNORECASE,
 )
 _CITY_PATTERN = re.compile(
-    r"\bin\s+(?P<city>" + "|".join(re.escape(c) for c in sorted(CITY_STATIONS, key=len, reverse=True)) + r")\b",
+    r"\b(?:in\s+)?(?P<city>" + "|".join(re.escape(c) for c in sorted(CITY_STATIONS, key=len, reverse=True)) + r")\b",
     re.IGNORECASE,
 )
 
@@ -275,7 +277,7 @@ def _extract_threshold(question: str) -> tuple[float | None, str | None, str | N
     unit: str | None = raw_unit if raw_unit in ("F", "C") else "C"
 
     raw_cond = m.group("condition").lower()
-    if any(w in raw_cond for w in ("exceed", "above", "reach", "at least", "higher", "be")):
+    if raw_cond in ("exceed", "above", "reach", "at least", "higher", "be"):
         condition = "above"
     else:
         condition = "below"
