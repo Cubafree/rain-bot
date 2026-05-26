@@ -1,8 +1,10 @@
 """Polymarket Gamma API client."""
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 import httpx
+from cachetools import TTLCache
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, field_validator
 from tenacity import (
@@ -18,6 +20,17 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE = "https://clob.polymarket.com"
 
 _log = logging.getLogger(__name__)
+
+# Order book cache: 60s TTL since prices change fast
+_ob_cache: TTLCache = TTLCache(maxsize=500, ttl=60)
+
+
+@dataclass
+class OrderBook:
+    spread: float         # best_ask - best_bid (0 if either side is empty)
+    depth_usd: float      # sum of top-5 bid sizes×prices + top-5 ask sizes×prices
+    best_bid: float | None
+    best_ask: float | None
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -294,3 +307,61 @@ async def get_price_at_time(
         return None
 
     return float(history[-1].get("p", 0.5))
+
+
+async def get_order_book(token_id: str) -> OrderBook | None:
+    """Fetch live order book for a CLOB token and return spread + depth metrics.
+
+    Uses GET /book?token_id={token_id}. Results are cached for 60 seconds.
+    Returns None on any error so the caller can continue without order book data.
+    """
+    cached = _ob_cache.get(token_id)
+    if cached is not None:
+        return cached
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{CLOB_BASE}/book",
+                params={"token_id": token_id},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        logger.debug("Order book fetch failed", token_id=token_id, error=str(e))
+        return None
+
+    try:
+        bids = sorted(
+            [(float(b["price"]), float(b["size"])) for b in data.get("bids", [])],
+            reverse=True,
+        )
+        asks = sorted(
+            [(float(a["price"]), float(a["size"])) for a in data.get("asks", [])],
+        )
+
+        best_bid = bids[0][0] if bids else None
+        best_ask = asks[0][0] if asks else None
+
+        if best_bid is not None and best_ask is not None:
+            spread = best_ask - best_bid
+        else:
+            spread = 0.0
+
+        top_bids = bids[:5]
+        top_asks = asks[:5]
+        depth_usd = sum(p * s for p, s in top_bids) + sum(p * s for p, s in top_asks)
+
+        ob = OrderBook(
+            spread=spread,
+            depth_usd=depth_usd,
+            best_bid=best_bid,
+            best_ask=best_ask,
+        )
+    except Exception as e:
+        logger.debug("Order book parse failed", token_id=token_id, error=str(e))
+        return None
+
+    _ob_cache[token_id] = ob
+    return ob

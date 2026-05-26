@@ -72,6 +72,8 @@ class Signal(Base):
     llm_model = Column(String(100))
     tokens_used = Column(Integer)
     source = Column(String(20), default="live_cycle", nullable=False)
+    ob_spread = Column(Numeric(6, 4), nullable=True)
+    ob_depth_usd = Column(Numeric(12, 2), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
