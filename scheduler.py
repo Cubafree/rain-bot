@@ -7,7 +7,7 @@ from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -77,6 +77,29 @@ def create_scheduler() -> AsyncIOScheduler:
 
 async def run_weather_cycle() -> None:
     global _consecutive_empty_cycles
+
+    # Hard daily LLM budget guard — abort before touching OpenRouter
+    today = datetime.now(timezone.utc).date()
+    async with db_session() as db:
+        spent_r = await db.execute(
+            select(func.coalesce(func.sum(CycleLog.llm_cost_usd), 0)).where(
+                func.date(CycleLog.started_at) == today
+            )
+        )
+        spent_today = float(spent_r.scalar_one())
+
+    if settings.max_daily_llm_cost_usd > 0 and spent_today >= settings.max_daily_llm_cost_usd:
+        logger.warning(
+            "Daily LLM budget exhausted — cycle aborted",
+            spent_usd=spent_today,
+            limit_usd=settings.max_daily_llm_cost_usd,
+        )
+        await alerter.send_alert(
+            "warning",
+            f"Daily LLM budget ${settings.max_daily_llm_cost_usd:.2f} reached "
+            f"(spent ${spent_today:.3f}) — cycle skipped",
+        )
+        return
 
     cycle_log = CycleLog(
         mode=settings.trading_mode,
