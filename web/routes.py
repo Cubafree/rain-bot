@@ -276,6 +276,73 @@ async def backtest_export(_: Auth, db: DB):
     )
 
 
+@router.get("/api/backtest/export.csv")
+async def backtest_export_csv(_: Auth, db: DB):
+    """Export backtest results as a downloadable CSV file."""
+    import csv
+    import io
+
+    first_bet_subq = (
+        select(func.min(Bet.id).label("bet_id"), Bet.signal_id)
+        .where(Bet.mode == "backtest")
+        .group_by(Bet.signal_id)
+        .subquery()
+    )
+
+    rows = (
+        await db.execute(
+            select(Signal, Bet, Market, Strategy)
+            .join(Market, Signal.market_id == Market.id)
+            .join(Strategy, Signal.strategy_id == Strategy.id)
+            .outerjoin(first_bet_subq, first_bet_subq.c.signal_id == Signal.id)
+            .outerjoin(Bet, Bet.id == first_bet_subq.c.bet_id)
+            .where(Signal.source == "backtest")
+            .order_by(desc(Signal.created_at))
+            .limit(10000)
+        )
+    ).all()
+
+    buf = io.StringIO()
+    fieldnames = [
+        "signal_id", "market", "city", "station", "target_date",
+        "strategy", "direction", "our_probability", "market_price", "edge",
+        "confidence", "outcome", "pnl", "forecast_source", "llm_model", "created_at",
+    ]
+    writer = csv.DictWriter(buf, fieldnames=fieldnames)
+    writer.writeheader()
+
+    for signal, bet, market, strategy in rows:
+        forecast_source = None
+        if signal.forecast_data and isinstance(signal.forecast_data, dict):
+            forecast_source = signal.forecast_data.get("source")
+
+        writer.writerow({
+            "signal_id": signal.id,
+            "market": market.question,
+            "city": market.city,
+            "station": market.weather_station,
+            "target_date": market.target_date.isoformat() if market.target_date else "",
+            "strategy": strategy.code,
+            "direction": signal.direction,
+            "our_probability": float(signal.our_probability) if signal.our_probability is not None else "",
+            "market_price": float(signal.market_price) if signal.market_price is not None else "",
+            "edge": float(signal.edge) if signal.edge is not None else "",
+            "confidence": signal.confidence or "",
+            "outcome": bet.outcome if bet else "",
+            "pnl": float(bet.pnl) if bet and bet.pnl is not None else "",
+            "forecast_source": forecast_source or "",
+            "llm_model": signal.llm_model or "",
+            "created_at": signal.created_at.isoformat() if signal.created_at else "",
+        })
+
+    from starlette.responses import Response
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="backtest_export.csv"'},
+    )
+
+
 @router.get("/backtest", response_class=HTMLResponse)
 async def backtest_page(request: Request, _: Auth, db: DB):
     strategies = (
