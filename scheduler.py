@@ -298,6 +298,7 @@ async def _analyze_and_bet(
             confidence=sig.confidence,
             reasoning=sig.reasoning,
             forecast_data=forecast.model_dump(),
+            forecast_source=forecast.data_source,
             llm_model=result.llm_model,
             tokens_used=result.tokens_used,
             source="live_cycle",

@@ -297,6 +297,7 @@ async def run_backtest(
                     confidence=sig.confidence,
                     reasoning=sig.reasoning,
                     forecast_data=forecast.model_dump(),
+                    forecast_source=forecast.data_source,
                     llm_model=signal_result.llm_model,
                     tokens_used=signal_result.tokens_used,
                     source="backtest",
