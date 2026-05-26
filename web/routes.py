@@ -220,6 +220,62 @@ async def backtest_clear(_: Auth, db: DB):
     return JSONResponse({"status": "cleared"})
 
 
+@router.get("/api/backtest/export")
+async def backtest_export(_: Auth, db: DB):
+    """Export backtest results as a downloadable JSON file."""
+    # Subquery: first bet per signal (lowest bet id)
+    first_bet_subq = (
+        select(func.min(Bet.id).label("bet_id"), Bet.signal_id)
+        .where(Bet.mode == "backtest")
+        .group_by(Bet.signal_id)
+        .subquery()
+    )
+
+    rows = (
+        await db.execute(
+            select(Signal, Bet, Market, Strategy)
+            .join(Market, Signal.market_id == Market.id)
+            .join(Strategy, Signal.strategy_id == Strategy.id)
+            .outerjoin(first_bet_subq, first_bet_subq.c.signal_id == Signal.id)
+            .outerjoin(Bet, Bet.id == first_bet_subq.c.bet_id)
+            .where(Signal.source == "backtest")
+            .order_by(desc(Signal.created_at))
+            .limit(10000)
+        )
+    ).all()
+
+    records = []
+    for signal, bet, market, strategy in rows:
+        forecast_source = None
+        if signal.forecast_data and isinstance(signal.forecast_data, dict):
+            forecast_source = signal.forecast_data.get("source")
+
+        records.append({
+            "signal_id": signal.id,
+            "market": market.question,
+            "city": market.city,
+            "station": market.weather_station,
+            "target_date": market.target_date.isoformat() if market.target_date else None,
+            "strategy": strategy.code,
+            "direction": signal.direction,
+            "our_probability": float(signal.our_probability) if signal.our_probability is not None else None,
+            "market_price": float(signal.market_price) if signal.market_price is not None else None,
+            "edge": float(signal.edge) if signal.edge is not None else None,
+            "confidence": signal.confidence,
+            "reasoning": signal.reasoning,
+            "forecast_source": forecast_source,
+            "outcome": bet.outcome if bet else None,
+            "pnl": float(bet.pnl) if bet and bet.pnl is not None else None,
+            "llm_model": signal.llm_model,
+            "created_at": signal.created_at.isoformat() if signal.created_at else None,
+        })
+
+    return JSONResponse(
+        content=records,
+        headers={"Content-Disposition": 'attachment; filename="backtest_export.json"'},
+    )
+
+
 @router.get("/backtest", response_class=HTMLResponse)
 async def backtest_page(request: Request, _: Auth, db: DB):
     strategies = (
