@@ -295,9 +295,25 @@ async def _analyze_and_bet(
     sig = result.signal
 
     # Respect minimum confidence and edge thresholds
-    if sig.confidence != settings.min_confidence or sig.direction is None:
+    if sig.direction is None:
+        return
+    if sig.confidence != settings.min_confidence:
+        logger.debug(
+            "Signal dropped (low confidence)",
+            question=market.question[:60],
+            strategy=strategy.code,
+            confidence=sig.confidence,
+            required=settings.min_confidence,
+        )
         return
     if abs(sig.edge) < settings.min_edge:
+        logger.debug(
+            "Signal dropped (insufficient edge)",
+            question=market.question[:60],
+            strategy=strategy.code,
+            edge=round(sig.edge, 4),
+            min_edge=settings.min_edge,
+        )
         return
 
     # Insert signal (skip if already exists for today)
