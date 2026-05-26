@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     min_paper_bets_for_live: int = Field(30, ge=1)
     min_live_winrate: float = Field(0.52, ge=0.0, le=1.0)
 
+    # Scheduler cycle guard: stop processing after this many LLM calls per cycle
+    max_cycle_llm_calls: int = Field(60, ge=10, le=500)
+
     # GFS timing: nominal runs at 00/06/12/18 UTC, data available ~4h later
     gfs_publish_delay_hours: int = Field(4, ge=1, le=6)
 

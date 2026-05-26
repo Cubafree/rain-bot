@@ -22,6 +22,14 @@ from services.whale_watcher import run_whale_cycle
 _consecutive_empty_cycles = 0
 
 
+class _CycleCounter:
+    """Mutable LLM-call counter shared across one cycle (asyncio-safe, single-threaded)."""
+    __slots__ = ("n",)
+
+    def __init__(self) -> None:
+        self.n = 0
+
+
 def create_scheduler() -> AsyncIOScheduler:
     jobstores = {"default": MemoryJobStore()}
 
@@ -130,9 +138,17 @@ async def run_weather_cycle() -> None:
             )
         ).scalars().all()
 
+        llm_counter = _CycleCounter()
         for gm in markets_raw:
+            if llm_counter.n >= settings.max_cycle_llm_calls:
+                logger.info(
+                    "Cycle LLM limit reached — stopping early",
+                    limit=settings.max_cycle_llm_calls,
+                    markets_scanned=cycle_log.markets_scanned,
+                )
+                break
             try:
-                await _process_market(db, gm, strategies, cycle_log)
+                await _process_market(db, gm, strategies, cycle_log, llm_counter)
             except Exception as e:
                 logger.error("Market processing failed", market_id=gm.id, error=str(e))
                 cycle_log.errors.append({
@@ -164,6 +180,7 @@ async def _process_market(
     gm: Any,
     strategies: list[Strategy],
     cycle_log: CycleLog,
+    llm_counter: "_CycleCounter",
 ) -> None:
     if hasattr(gm, 'volume') and gm.volume is not None and gm.volume < settings.min_market_volume_usd:
         logger.debug("Market skipped (volume too low)", question=gm.question[:80], volume=gm.volume)
@@ -225,7 +242,7 @@ async def _process_market(
         return
 
     tasks = [
-        _analyze_and_bet(db, market, strategy, gm, forecast, cycle_log)
+        _analyze_and_bet(db, market, strategy, gm, forecast, cycle_log, llm_counter)
         for strategy in strategies
     ]
     await asyncio.gather(*tasks, return_exceptions=True)
@@ -238,7 +255,11 @@ async def _analyze_and_bet(
     gm: Any,
     forecast: Any,
     cycle_log: CycleLog,
+    llm_counter: "_CycleCounter",
 ) -> None:
+    if llm_counter.n >= settings.max_cycle_llm_calls:
+        return
+    llm_counter.n += 1
     result = await analyzer.analyze(
         question=market.question,
         yes_price=gm.yes_price,
