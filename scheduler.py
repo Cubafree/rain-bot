@@ -273,6 +273,7 @@ async def _analyze_and_bet(
     )
 
     cycle_log.llm_tokens_used = (cycle_log.llm_tokens_used or 0) + result.tokens_used
+    cycle_log.llm_cost_usd = float(cycle_log.llm_cost_usd or 0) + result.cost_usd
 
     if result.signal is None:
         return

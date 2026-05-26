@@ -80,10 +80,25 @@ class LLMSignal(BaseModel):
         return round(float(v), 4)
 
 
+# Approximate cost per 1M total tokens by OpenRouter model slug
+_MODEL_COST_PER_M: dict[str, float] = {
+    "deepseek/deepseek-chat": 0.27,
+    "deepseek/deepseek-r1": 2.50,
+    "openai/gpt-4o-mini": 0.30,
+}
+_DEFAULT_COST_PER_M = 0.50
+
+
+def _estimate_cost(model: str, tokens: int) -> float:
+    rate = _MODEL_COST_PER_M.get(model, _DEFAULT_COST_PER_M)
+    return round(tokens * rate / 1_000_000, 6)
+
+
 class AnalysisResult(BaseModel):
     signal: LLMSignal | None
     llm_model: str
     tokens_used: int
+    cost_usd: float = 0.0
     raw_response: str | None = None
 
 
@@ -200,7 +215,13 @@ async def analyze(
     if signal:
         _verify_edge(signal, yes_price, no_price)
 
-    return AnalysisResult(signal=signal, llm_model=model, tokens_used=tokens, raw_response=raw)
+    return AnalysisResult(
+        signal=signal,
+        llm_model=model,
+        tokens_used=tokens,
+        cost_usd=_estimate_cost(model, tokens),
+        raw_response=raw,
+    )
 
 
 async def health_check() -> bool:

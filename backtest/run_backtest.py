@@ -347,8 +347,9 @@ async def _get_cached_forecast(
     hours_ahead_override: float | None = None,
     bias_f: float = 0.0,
 ):
-    # Include bias in cache key so different bias values aren't served stale
-    key = f"hf:{station}:{target_date.isoformat()}:{as_of_date.isoformat()}:b{bias_f:.2f}"
+    # Include threshold and bias so markets with different thresholds on same station/date don't collide
+    thr_str = f"{threshold:.1f}" if threshold is not None else "N"
+    key = f"hf:{station}:{target_date.isoformat()}:{as_of_date.isoformat()}:t{thr_str}:b{bias_f:.2f}"
     cached = CACHE.get(key)
     if cached == _WEATHER_MISS:
         return None

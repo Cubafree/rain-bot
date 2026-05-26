@@ -290,13 +290,15 @@ def _apply_bias(summary: WeatherSummary, bias_f: float) -> WeatherSummary:
     """Subtract station bias (mean forecast - actual) from temperature fields."""
     if bias_f == 0.0:
         return summary
-    mean_max = (summary.mean_max_f or 0) - bias_f
-    p10 = (summary.p10_max_f or 0) - bias_f
-    p90 = (summary.p90_max_f or 0) - bias_f
+    if summary.mean_max_f is None:
+        return summary
+    mean_max = summary.mean_max_f - bias_f
+    p10 = (summary.p10_max_f - bias_f) if summary.p10_max_f is not None else None
+    p90 = (summary.p90_max_f - bias_f) if summary.p90_max_f is not None else None
 
     pct_above = summary.pct_above_threshold
     pct_below = summary.pct_below_threshold
-    if summary.threshold is not None and p90 > p10:
+    if summary.threshold is not None and p10 is not None and p90 is not None and p90 > p10:
         # Derive sigma from P10/P90 spread (valid after _add_forecast_noise set them)
         sigma = (p90 - p10) / (2 * 1.28)
         z = (mean_max - summary.threshold) / max(sigma, 0.5)
@@ -305,8 +307,8 @@ def _apply_bias(summary: WeatherSummary, bias_f: float) -> WeatherSummary:
 
     return summary.model_copy(update={
         "mean_max_f": round(mean_max, 1),
-        "p10_max_f": round(p10, 1),
-        "p90_max_f": round(p90, 1),
+        "p10_max_f": round(p10, 1) if p10 is not None else None,
+        "p90_max_f": round(p90, 1) if p90 is not None else None,
         "pct_above_threshold": pct_above,
         "pct_below_threshold": pct_below,
     })
