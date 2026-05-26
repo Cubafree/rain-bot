@@ -81,6 +81,26 @@ def test_build_summary_pct_above():
     assert summary.threshold == 95.0
 
 
+def test_build_summary_celsius_threshold_converted():
+    # 33°C = 91.4°F; temps [82.2°F] should be BELOW threshold, not above
+    data = {
+        "daily": {
+            "time": ["2026-05-25"],
+            "temperature_2m_max": [82.2],
+            "temperature_2m_min": [75.0],
+            "precipitation_sum": [0.1],
+        }
+    }
+    summary = _build_summary(data, "VHHH", date(2026, 5, 25), threshold=33.0, threshold_unit="C")
+
+    # 82.2°F < 91.4°F → pct_above must be 0, not 1
+    assert summary.pct_above_threshold == 0.0
+    assert summary.pct_below_threshold == 1.0
+    # Stored threshold must be in Fahrenheit
+    assert summary.threshold is not None
+    assert abs(summary.threshold - 91.4) < 0.2
+
+
 def test_build_summary_single_member_p10_p90_equal_mean():
     # ERA5-style: one observation — percentile indices both collapse to index 0
     data = {

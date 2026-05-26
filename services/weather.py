@@ -241,10 +241,13 @@ async def get_actual_outcome(
     if actual_max is None:
         return None
 
+    # API returns Fahrenheit; convert Celsius threshold to match.
+    threshold_f = threshold * 9 / 5 + 32 if threshold_unit == "C" else threshold
+
     if condition == "above":
-        return "YES" if actual_max > threshold else "NO"
+        return "YES" if actual_max > threshold_f else "NO"
     else:
-        return "YES" if actual_max < threshold else "NO"
+        return "YES" if actual_max < threshold_f else "NO"
 
 
 def _add_forecast_noise(summary: WeatherSummary, hours_ahead: float) -> WeatherSummary:
@@ -337,9 +340,12 @@ def _build_summary(
     p10 = sorted_max[int(len(sorted_max) * 0.1)] if sorted_max else None
     p90 = sorted_max[int(len(sorted_max) * 0.9)] if sorted_max else None
 
+    # API always returns Fahrenheit; convert Celsius threshold to match.
+    threshold_f = threshold * 9 / 5 + 32 if (threshold is not None and threshold_unit == "C") else threshold
+
     pct_above = pct_below = None
-    if threshold is not None and valid_max:
-        pct_above = sum(1 for t in valid_max if t > threshold) / len(valid_max)
+    if threshold_f is not None and valid_max:
+        pct_above = sum(1 for t in valid_max if t > threshold_f) / len(valid_max)
         pct_below = 1.0 - pct_above
 
     if hours_ahead_override is not None:
@@ -360,6 +366,6 @@ def _build_summary(
         precipitation_mm=round(precip[0], 1) if precip and precip[0] is not None else None,
         pct_above_threshold=round(pct_above, 3) if pct_above is not None else None,
         pct_below_threshold=round(pct_below, 3) if pct_below is not None else None,
-        threshold=threshold,
+        threshold=round(threshold_f, 1) if threshold_f is not None else None,
         hours_ahead=round(hours_ahead, 1) if hours_ahead is not None else None,
     )
