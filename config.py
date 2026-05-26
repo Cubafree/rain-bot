@@ -15,7 +15,7 @@ class Settings(BaseSettings):
 
     # OpenRouter
     openrouter_api_key: str = Field(..., min_length=10)
-    openrouter_model: str = "deepseek/deepseek-r1"
+    openrouter_model: str = "deepseek/deepseek-chat"
     openrouter_fallback_model: str = "openai/gpt-4o-mini"
     # Faster model used during backtesting (no chain-of-thought needed)
     openrouter_backtest_model: str = "deepseek/deepseek-chat"
