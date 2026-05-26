@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     trading_mode: Literal["paper", "live"] = "paper"
     max_bet_usd: float = Field(5.0, ge=0.1, le=100.0)
     min_edge: float = Field(0.08, ge=0.01, le=0.50)
+    max_ob_spread: float = Field(0.15, ge=0.0, le=1.0)
     min_confidence: Literal["high", "medium", "low"] = "high"
     paper_starting_balance_usd: float = Field(10000.0, ge=100.0)
     kelly_fraction: float = Field(0.25, ge=0.05, le=1.0)

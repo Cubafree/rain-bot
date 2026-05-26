@@ -241,8 +241,12 @@ async def _process_market(
         })
         return
 
+    ob = None
+    if hasattr(gm, 'clobTokenIds') and gm.clobTokenIds:
+        ob = await polymarket.get_order_book(gm.clobTokenIds[0])
+
     tasks = [
-        _analyze_and_bet(db, market, strategy, gm, forecast, cycle_log, llm_counter)
+        _analyze_and_bet(db, market, strategy, gm, forecast, cycle_log, llm_counter, ob)
         for strategy in strategies
     ]
     await asyncio.gather(*tasks, return_exceptions=True)
@@ -256,7 +260,17 @@ async def _analyze_and_bet(
     forecast: Any,
     cycle_log: CycleLog,
     llm_counter: "_CycleCounter",
+    ob: Any = None,
 ) -> None:
+    if ob is not None and ob.spread > settings.max_ob_spread:
+        logger.debug(
+            "Market skipped (wide spread)",
+            question=market.question[:80],
+            spread=ob.spread,
+            max_spread=settings.max_ob_spread,
+        )
+        return
+
     if llm_counter.n >= settings.max_cycle_llm_calls:
         return
     llm_counter.n += 1
@@ -301,6 +315,8 @@ async def _analyze_and_bet(
             llm_model=result.llm_model,
             tokens_used=result.tokens_used,
             source="live_cycle",
+            ob_spread=ob.spread if ob else None,
+            ob_depth_usd=ob.depth_usd if ob else None,
         )
         db.add(signal)
         await db.flush()

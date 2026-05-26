@@ -300,6 +300,8 @@ async def run_backtest(
                     llm_model=signal_result.llm_model,
                     tokens_used=signal_result.tokens_used,
                     source="backtest",
+                    ob_spread=None,
+                    ob_depth_usd=None,
                 )
                 db.add(signal_obj)
                 await db.flush()
