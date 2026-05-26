@@ -14,6 +14,7 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/test
       OPENROUTER_API_KEY: sk-test-placeholder
       DASHBOARD_PASSWORD: testpass1
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     services:
       postgres:
