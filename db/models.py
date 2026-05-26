@@ -67,6 +67,8 @@ class Signal(Base):
     confidence = Column(String(20))
     reasoning = Column(Text)
     forecast_data = Column(JSONB)
+    forecast_source = Column(String(30))
+    is_contaminated = Column(Boolean, nullable=False, default=False)
     llm_model = Column(String(100))
     tokens_used = Column(Integer)
     source = Column(String(20), default="live_cycle", nullable=False)
