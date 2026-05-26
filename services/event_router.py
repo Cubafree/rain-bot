@@ -178,6 +178,25 @@ STATION_COORDS: dict[str, tuple[float, float]] = {
     "FAOR": (-26.139, 28.246),
 }
 
+# Forecast coordinate overrides — used when the official met-service reporting point
+# (which Polymarket uses for resolution) is in the city center rather than the airport.
+# Airport ICAO coords can differ from the national-service reference by 3-8°F due to
+# urban heat island, coastal exposure, or suburban location.
+FORECAST_COORDS: dict[str, tuple[float, float]] = {
+    # HKO Tsim Sha Tsui — official "Hong Kong temperature"; airport on Lantau Island ~15km away
+    "VHHH": (22.302, 114.174),
+    # JMA Tokyo (Otemachi) — national agency reference; Haneda is on Tokyo Bay, cooler
+    "RJTT": (35.694, 139.752),
+    # Beijing national met station — Capital Airport (ZBAA) is 25km NE of city
+    "ZBAA": (39.927, 116.397),
+    # Shanghai city center — Pudong (ZSPD) is 30km east on coast, consistently cooler
+    "ZSPD": (31.228, 121.474),
+    # Bangkok city center — Suvarnabhumi (VTBS) is 25km SE of the city
+    "VTBS": (13.754, 100.501),
+    # São Paulo city center — Guarulhos (SBGR) is in NE suburbs; city has strong UHI
+    "SBGR": (-23.549, -46.634),
+}
+
 _MONTH_MAP = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
     "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
@@ -228,7 +247,9 @@ def parse_market(question: str) -> ParsedMarket:
     """
     city = _extract_city(question)
     station = CITY_STATIONS.get(city) if city else None
-    coords = STATION_COORDS.get(station) if station else None
+    # Use city-center coords where the national met service reports from the city,
+    # not the airport (FORECAST_COORDS overrides STATION_COORDS for those stations).
+    coords = (FORECAST_COORDS.get(station) or STATION_COORDS.get(station)) if station else None
 
     threshold, unit, condition = _extract_threshold(question)
     target_date = _extract_date(question)
