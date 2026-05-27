@@ -71,7 +71,8 @@ async def _settle_resolved_markets(db: AsyncSession) -> None:
         amount = float(bet.amount_usd)
         entry = float(bet.entry_price)
         if bet_won:
-            bet.pnl = round(amount * (1.0 / entry - 1.0), 2)
+            # Guard against entry_price == 0 (degenerate bets placed at zero price)
+            bet.pnl = round(amount * (1.0 / entry - 1.0), 2) if entry > 0 else 0.0
         else:
             bet.pnl = round(-amount, 2)
 
