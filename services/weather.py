@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict
 from tenacity import retry, retry_if_exception, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
 HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 HISTORICAL_WEATHER_URL = "https://archive-api.open-meteo.com/v1/archive"
 
@@ -75,7 +76,20 @@ async def get_forecast(
         if cache_key in _cache:
             return _cache[cache_key]
 
-    base_params = {
+    # GFS: 31-member ensemble (control + 30 perturbed) via dedicated ensemble endpoint
+    ensemble_params = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "hourly": "temperature_2m,precipitation",
+        "temperature_unit": "fahrenheit",
+        "precipitation_unit": "mm",
+        "timezone": "UTC",
+        "start_date": target_date.isoformat(),
+        "end_date": target_date.isoformat(),
+        "models": "gfs025",
+    }
+    # ECMWF deterministic — daily, kept for model agreement delta only
+    ecmwf_params = {
         "latitude": latitude,
         "longitude": longitude,
         "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum",
@@ -84,22 +98,21 @@ async def get_forecast(
         "timezone": "UTC",
         "start_date": target_date.isoformat(),
         "end_date": target_date.isoformat(),
+        "models": "ecmwf_ifs04",
     }
-    gfs_params = {**base_params, "models": "gfs_seamless"}
-    ecmwf_params = {**base_params, "models": "ecmwf_ifs04"}
 
     async with httpx.AsyncClient() as client:
-        gfs_task = asyncio.create_task(_fetch(client, FORECAST_URL, gfs_params))
+        gfs_task = asyncio.create_task(_fetch(client, ENSEMBLE_URL, ensemble_params))
         ecmwf_task = asyncio.create_task(_fetch(client, FORECAST_URL, ecmwf_params))
         gfs_data, ecmwf_data = await asyncio.gather(gfs_task, ecmwf_task, return_exceptions=True)
 
     if isinstance(gfs_data, Exception):
-        logger.error(f"GFS forecast failed: {gfs_data}", station=station)
+        logger.error(f"GFS ensemble forecast failed: {gfs_data}", station=station)
         return None
 
-    summary = _build_summary(gfs_data, station, target_date, threshold, threshold_unit)
+    summary = _build_summary_from_ensemble(gfs_data, station, target_date, threshold, threshold_unit)
 
-    # Blend ECMWF if available
+    # ECMWF model agreement delta (blend GFS ensemble mean 55% / ECMWF det. 45%)
     if not isinstance(ecmwf_data, Exception):
         ecmwf_summary = _build_summary(ecmwf_data, station, target_date, threshold, threshold_unit)
         if ecmwf_summary.mean_max_f is not None and summary.mean_max_f is not None:
@@ -315,6 +328,107 @@ def _apply_bias(summary: WeatherSummary, bias_f: float) -> WeatherSummary:
         "pct_above_threshold": pct_above,
         "pct_below_threshold": pct_below,
     })
+
+
+def _extract_member_daily_extremes(
+    data: dict,
+    target_date: date,
+) -> tuple[list[float], list[float], float | None]:
+    """Return (member_maxes, member_mins, precip_mm) from GFS025 ensemble hourly response.
+
+    All temperature columns (``temperature_2m`` control + ``temperature_2m_memberXX``)
+    are aggregated to a daily max and min.  Precipitation is summed for the control run.
+    """
+    hourly = data.get("hourly", {})
+    times = hourly.get("time", [])
+    date_str = target_date.isoformat()
+    target_idx = [i for i, t in enumerate(times) if t.startswith(date_str)]
+
+    if not target_idx:
+        return [], [], None
+
+    # Collect control + perturbed member temperature columns
+    temp_keys = sorted(
+        k for k in hourly
+        if k == "temperature_2m"
+        or (k.startswith("temperature_2m_member") and k[len("temperature_2m_member"):].isdigit())
+    )
+
+    member_maxes: list[float] = []
+    member_mins: list[float] = []
+    for key in temp_keys:
+        vals = hourly[key]
+        day_vals = [vals[i] for i in target_idx if i < len(vals) and vals[i] is not None]
+        if day_vals:
+            member_maxes.append(max(day_vals))
+            member_mins.append(min(day_vals))
+
+    # Precipitation — sum control-run hourly values for the day
+    precip_vals = hourly.get("precipitation", [])
+    precip_day = [precip_vals[i] for i in target_idx if i < len(precip_vals) and precip_vals[i] is not None]
+    precip_total = round(sum(precip_day), 1) if precip_day else None
+
+    return member_maxes, member_mins, precip_total
+
+
+def _build_summary_from_ensemble(
+    data: dict,
+    station: str,
+    target_date: date,
+    threshold: float | None,
+    threshold_unit: str,
+    hours_ahead_override: float | None = None,
+) -> WeatherSummary:
+    """Build WeatherSummary from GFS025 ensemble hourly API response.
+
+    Computes genuine per-member daily max temperatures so that
+    ``pct_above_threshold``, ``p10_max_f``, and ``p90_max_f`` reflect the
+    real ensemble spread instead of the degenerate 0 %/100 % values produced
+    by a single deterministic run.
+    """
+    member_maxes, member_mins, precip_mm = _extract_member_daily_extremes(data, target_date)
+
+    if not member_maxes:
+        logger.warning("GFS ensemble returned no temperature data", station=station, date=target_date)
+        return WeatherSummary(station=station, target_date=target_date.isoformat(), members=0)
+
+    n = len(member_maxes)
+    sorted_maxes = sorted(member_maxes)
+    mean_max = sum(member_maxes) / n
+    mean_min = sum(member_mins) / len(member_mins) if member_mins else None
+    p10 = sorted_maxes[max(0, int(n * 0.1))]
+    p90 = sorted_maxes[min(n - 1, int(n * 0.9))]
+
+    threshold_f = threshold * 9 / 5 + 32 if (threshold is not None and threshold_unit == "C") else threshold
+
+    pct_above = pct_below = None
+    if threshold_f is not None:
+        pct_above = round(sum(1 for t in member_maxes if t > threshold_f) / n, 3)
+        pct_below = round(1.0 - pct_above, 3)
+
+    if hours_ahead_override is not None:
+        hours_ahead = hours_ahead_override
+    else:
+        from datetime import timezone as _tz
+        now_utc = datetime.now(_tz.utc)
+        target_dt = datetime(target_date.year, target_date.month, target_date.day, tzinfo=_tz.utc)
+        hours_ahead = max(0.0, (target_dt - now_utc).total_seconds() / 3600)
+
+    return WeatherSummary(
+        station=station,
+        target_date=target_date.isoformat(),
+        members=n,
+        mean_max_f=round(mean_max, 1),
+        mean_min_f=round(mean_min, 1) if mean_min is not None else None,
+        p10_max_f=round(p10, 1),
+        p90_max_f=round(p90, 1),
+        precipitation_mm=precip_mm,
+        pct_above_threshold=pct_above,
+        pct_below_threshold=pct_below,
+        threshold=round(threshold_f, 1) if threshold_f is not None else None,
+        hours_ahead=round(hours_ahead, 1),
+        data_source="gfs_forecast",
+    )
 
 
 def _build_summary(
