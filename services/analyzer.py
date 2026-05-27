@@ -105,7 +105,7 @@ class AnalysisResult(BaseModel):
 def _is_retryable_llm(exc: BaseException) -> bool:
     if isinstance(exc, (httpx.TransportError, httpx.TimeoutException)):
         return True
-    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (429, 500, 502, 503, 504):
         return True
     return False
 

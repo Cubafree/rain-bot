@@ -245,11 +245,17 @@ async def _process_market(
     if hasattr(gm, 'clobTokenIds') and gm.clobTokenIds:
         ob = await polymarket.get_order_book(gm.clobTokenIds[0])
 
-    tasks = [
-        _analyze_and_bet(db, market, strategy, gm, forecast, cycle_log, llm_counter, ob)
-        for strategy in strategies
-    ]
-    await asyncio.gather(*tasks, return_exceptions=True)
+    # Sequential — shared AsyncSession does not support concurrent flush/add from gather
+    for strategy in strategies:
+        try:
+            await _analyze_and_bet(db, market, strategy, gm, forecast, cycle_log, llm_counter, ob)
+        except Exception as exc:
+            logger.warning(
+                "Strategy analysis failed",
+                market_id=market.id,
+                strategy=strategy.code,
+                error=str(exc),
+            )
 
 
 async def _analyze_and_bet(
@@ -316,34 +322,36 @@ async def _analyze_and_bet(
         )
         return
 
-    # Insert signal (skip if already exists for today)
+    # Insert signal — use savepoint so a UniqueViolation doesn't poison the outer transaction
+    from sqlalchemy.exc import IntegrityError
+
+    signal = Signal(
+        market_id=market.id,
+        strategy_id=strategy.id,
+        our_probability=sig.our_probability,
+        market_price=gm.yes_price if sig.direction == "YES" else gm.no_price,
+        edge=sig.edge,
+        direction=sig.direction,
+        confidence=sig.confidence,
+        reasoning=sig.reasoning,
+        forecast_data=forecast.model_dump(),
+        forecast_source=forecast.data_source,
+        llm_model=result.llm_model,
+        tokens_used=result.tokens_used,
+        source="live_cycle",
+        ob_spread=ob.spread if ob else None,
+        ob_depth_usd=ob.depth_usd if ob else None,
+    )
     try:
-        signal = Signal(
-            market_id=market.id,
-            strategy_id=strategy.id,
-            our_probability=sig.our_probability,
-            market_price=gm.yes_price if sig.direction == "YES" else gm.no_price,
-            edge=sig.edge,
-            direction=sig.direction,
-            confidence=sig.confidence,
-            reasoning=sig.reasoning,
-            forecast_data=forecast.model_dump(),
-            forecast_source=forecast.data_source,
-            llm_model=result.llm_model,
-            tokens_used=result.tokens_used,
-            source="live_cycle",
-            ob_spread=ob.spread if ob else None,
-            ob_depth_usd=ob.depth_usd if ob else None,
-        )
-        db.add(signal)
-        await db.flush()
-        cycle_log.signals_found = (cycle_log.signals_found or 0) + 1
-    except Exception as e:
-        if "uq_signal_market_strategy_day" in str(e):
+        async with db.begin_nested():  # SAVEPOINT — rolls back only this insert on conflict
+            db.add(signal)
+            await db.flush()
+    except IntegrityError as e:
+        if "uq_signal_market_strategy_day" in str(e) or "UniqueViolation" in str(e):
             logger.debug("Duplicate signal skipped", market_id=market.id, strategy=strategy.code)
-        else:
-            raise
-        return
+            return
+        raise
+    cycle_log.signals_found = (cycle_log.signals_found or 0) + 1
 
     bet = await place_bet(
         db=db,
