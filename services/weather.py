@@ -351,8 +351,9 @@ def _build_summary(
     if hours_ahead_override is not None:
         hours_ahead = hours_ahead_override
     else:
-        now_utc = datetime.utcnow()
-        target_dt = datetime(target_date.year, target_date.month, target_date.day)
+        from datetime import timezone as _tz
+        now_utc = datetime.now(_tz.utc)
+        target_dt = datetime(target_date.year, target_date.month, target_date.day, tzinfo=_tz.utc)
         hours_ahead = max(0.0, (target_dt - now_utc).total_seconds() / 3600)
 
     return WeatherSummary(

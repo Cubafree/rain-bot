@@ -33,8 +33,8 @@ Current NO price: {no_price}
 Strategy: {strategy_name} — {strategy_description}
 
 GFS/ECMWF Forecast for station {station} on {date}:
-- Mean max temperature (GFS/ECMWF blend): {mean_max_f}°F
-- ECMWF mean max: {ecmwf_mean_max_f}°F
+- Mean {temp_label} (GFS/ECMWF blend): {mean_temp_f}°F
+- ECMWF mean {temp_label}: {ecmwf_mean_max_f}°F
 - GFS/ECMWF agreement: within {model_agreement_delta_f}°F
 - P10/P90 range: {p10_f}°F – {p90_f}°F
 - Ensemble members above threshold ({threshold}°F): {pct_above:.1%}
@@ -171,6 +171,15 @@ async def analyze(
 
     strategy_extra = _build_strategy_extra(strategy_code, strategy_params, forecast)
 
+    # Use min temperature for "below/lowest" markets, max for everything else
+    is_below_market = any(kw in question.lower() for kw in ("lowest", "below", "minimum", "no more than", "less than"))
+    if is_below_market and forecast.mean_min_f is not None:
+        temp_label = "min temperature"
+        mean_temp_f = forecast.mean_min_f
+    else:
+        temp_label = "max temperature"
+        mean_temp_f = forecast.mean_max_f
+
     prompt = WEATHER_ANALYSIS_PROMPT.format(
         question=question,
         yes_price=yes_price,
@@ -180,7 +189,8 @@ async def analyze(
         strategy_description=strategy_description,
         station=station,
         date=forecast.target_date,
-        mean_max_f=forecast.mean_max_f if forecast.mean_max_f is not None else "N/A",
+        temp_label=temp_label,
+        mean_temp_f=mean_temp_f if mean_temp_f is not None else "N/A",
         ecmwf_mean_max_f=forecast.ecmwf_mean_max_f if forecast.ecmwf_mean_max_f is not None else "N/A",
         model_agreement_delta_f=forecast.model_agreement_delta_f if forecast.model_agreement_delta_f is not None else "N/A",
         p10_f=forecast.p10_max_f if forecast.p10_max_f is not None else "N/A",

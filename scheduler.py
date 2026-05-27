@@ -233,6 +233,18 @@ async def _process_market(
     if market.resolved or market.parse_failed:
         return
 
+    # Load station bias for this station+month from DB (populated by compute_bias.py)
+    from db.models import StationBias
+    bias_row = (
+        await db.execute(
+            select(StationBias).where(
+                StationBias.station == parsed.station,
+                StationBias.month == parsed.target_date.month,
+            )
+        )
+    ).scalar_one_or_none()
+    bias_f = float(bias_row.bias_f) if bias_row else 0.0
+
     forecast = await weather.get_forecast(
         station=parsed.station,
         target_date=parsed.target_date,
@@ -240,6 +252,7 @@ async def _process_market(
         longitude=parsed.longitude,
         threshold=parsed.threshold,
         threshold_unit=parsed.unit or "F",
+        bias_f=bias_f,
     )
 
     if forecast is None:
@@ -411,6 +424,11 @@ async def materialize_daily_stats() -> None:
                 func.date(CycleLog.started_at) == yesterday
             )
         )
+        signals_r = await db.execute(
+            select(func.coalesce(func.sum(CycleLog.signals_found), 0)).where(
+                func.date(CycleLog.started_at) == yesterday
+            )
+        )
 
         wins = wins_r.scalar_one() or 0
         losses = losses_r.scalar_one() or 0
@@ -419,6 +437,7 @@ async def materialize_daily_stats() -> None:
 
         stat = DailyStats(
             stat_date=yesterday,
+            total_signals=int(signals_r.scalar_one() or 0),
             total_bets=total_bets,
             wins=wins,
             losses=losses,

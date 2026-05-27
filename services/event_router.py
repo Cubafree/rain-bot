@@ -320,6 +320,15 @@ def _extract_date(question: str) -> date | None:
     year = int(m.group("year")) if m.group("year") else date.today().year
 
     try:
-        return date(year, month, day)
+        parsed = date(year, month, day)
     except ValueError:
         return None
+
+    # If parsed date is in the past and no explicit year was given, try next year.
+    # Handles Dec→Jan boundary: "January 5" parsed in December should be next year.
+    if not m.group("year") and parsed < date.today():
+        try:
+            parsed = date(year + 1, month, day)
+        except ValueError:
+            return parsed
+    return parsed

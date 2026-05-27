@@ -93,25 +93,22 @@ async def _check_unresolved_markets(db: AsyncSession) -> None:
     """Void bets for markets that closed without resolution (delisted)."""
     now = datetime.now(timezone.utc)
 
-    expired = (
+    # Single query — join Market to avoid N+1
+    rows = (
         await db.execute(
-            select(Bet)
-            .join(Market)
+            select(Bet, Market)
+            .join(Market, Bet.market_id == Market.id)
             .where(
                 Bet.outcome == "pending",
+                Market.close_time.isnot(None),
                 Market.close_time < now,
                 Market.resolved.is_(False),
             )
         )
-    ).scalars().all()
+    ).all()
 
-    for bet in expired:
-        market_r = await db.execute(select(Market).where(Market.id == bet.market_id))
-        market = market_r.scalar_one_or_none()
-        if not market:
-            continue
-
-        days_past_close = (now - market.close_time).days if market.close_time else 0
+    for bet, market in rows:
+        days_past_close = (now - market.close_time).days
         if days_past_close < 3:
             continue
 
