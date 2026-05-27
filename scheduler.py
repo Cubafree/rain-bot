@@ -186,6 +186,12 @@ async def _process_market(
         logger.debug("Market skipped (volume too low)", question=gm.question[:80], volume=gm.volume)
         return
 
+    # Skip near-resolved markets — price at extremes means market is essentially done
+    yes_p = getattr(gm, 'yes_price', None)
+    if yes_p is not None and (yes_p < 0.04 or yes_p > 0.96):
+        logger.debug("Market skipped (price near resolution)", question=gm.question[:80], yes_price=yes_p)
+        return
+
     parsed = parse_market(gm.question)
 
     if parsed.parse_confidence < 0.8 or parsed.station is None:
@@ -197,6 +203,9 @@ async def _process_market(
 
     from datetime import date as _date
     days_until = (parsed.target_date - _date.today()).days
+    if days_until < 0:
+        logger.debug("Market target date in the past, skipping", station=parsed.station, days_until=days_until)
+        return
     if days_until > 16:
         logger.debug("Market beyond 16-day forecast window, skipping", station=parsed.station, days_until=days_until)
         return
