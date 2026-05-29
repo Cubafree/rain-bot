@@ -15,8 +15,8 @@ class Settings(BaseSettings):
 
     # OpenRouter
     openrouter_api_key: str = Field(..., min_length=10)
-    openrouter_model: str = "deepseek/deepseek-chat"
-    openrouter_fallback_model: str = "openai/gpt-4o-mini"
+    openrouter_model: str = "openai/gpt-4o-mini"
+    openrouter_fallback_model: str = "deepseek/deepseek-chat"
     # Faster model used during backtesting (no chain-of-thought needed)
     openrouter_backtest_model: str = "deepseek/deepseek-chat"
 
@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     min_confidence: Literal["high", "medium", "low"] = "high"
     paper_starting_balance_usd: float = Field(10000.0, ge=100.0)
     kelly_fraction: float = Field(0.25, ge=0.05, le=1.0)
-    max_concurrent_positions: int = Field(10, ge=1, le=50)
+    max_concurrent_positions: int = Field(20, ge=1, le=50)
     max_strategy_exposure_pct: float = Field(0.20, ge=0.01, le=1.0)
     max_daily_llm_cost_usd: float = Field(2.0, ge=0.0)
 

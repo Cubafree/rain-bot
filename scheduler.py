@@ -267,10 +267,14 @@ async def _process_market(
     if hasattr(gm, 'clobTokenIds') and gm.clobTokenIds:
         ob = await polymarket.get_order_book(gm.clobTokenIds[0])
 
-    # Sequential — shared AsyncSession does not support concurrent flush/add from gather
+    # Collect signals from all strategies, then place only the highest-edge bet per market.
+    # This prevents N correlated bets on the same outcome and conserves position slots.
+    signals: list[tuple[float, "Strategy", Any]] = []  # (|edge|, strategy, result)
     for strategy in strategies:
         try:
-            await _analyze_and_bet(db, market, strategy, gm, forecast, cycle_log, llm_counter, ob)
+            result = await _get_signal(db, market, strategy, gm, forecast, cycle_log, llm_counter, ob)
+            if result is not None:
+                signals.append(result)
         except Exception as exc:
             logger.warning(
                 "Strategy analysis failed",
@@ -279,8 +283,16 @@ async def _process_market(
                 error=str(exc),
             )
 
+    if not signals:
+        return
 
-async def _analyze_and_bet(
+    # Best edge wins — only one bet placed per market per cycle
+    signals.sort(key=lambda t: t[0], reverse=True)
+    abs_edge, best_strategy, best_result = signals[0]
+    await _place_signal_bet(db, market, best_strategy, gm, best_result, forecast, cycle_log)
+
+
+async def _get_signal(
     db: AsyncSession,
     market: Market,
     strategy: Strategy,
@@ -289,7 +301,8 @@ async def _analyze_and_bet(
     cycle_log: CycleLog,
     llm_counter: "_CycleCounter",
     ob: Any = None,
-) -> None:
+) -> "tuple[float, Strategy, Any] | None":
+    """Run LLM analysis for one strategy. Returns (|edge|, strategy, result) or None."""
     if ob is not None and ob.spread > settings.max_ob_spread:
         logger.debug(
             "Market skipped (wide spread)",
@@ -297,10 +310,10 @@ async def _analyze_and_bet(
             spread=ob.spread,
             max_spread=settings.max_ob_spread,
         )
-        return
+        return None
 
     if llm_counter.n >= settings.max_cycle_llm_calls:
-        return
+        return None
     llm_counter.n += 1
     result = await analyzer.analyze(
         question=market.question,
@@ -318,13 +331,12 @@ async def _analyze_and_bet(
     cycle_log.llm_cost_usd = float(cycle_log.llm_cost_usd or 0) + result.cost_usd
 
     if result.signal is None:
-        return
+        return None
 
     sig = result.signal
 
-    # Respect minimum confidence and edge thresholds
     if sig.direction is None:
-        return
+        return None
     if sig.confidence != settings.min_confidence:
         logger.debug(
             "Signal dropped (low confidence)",
@@ -333,7 +345,7 @@ async def _analyze_and_bet(
             confidence=sig.confidence,
             required=settings.min_confidence,
         )
-        return
+        return None
     if abs(sig.edge) < settings.min_edge:
         logger.debug(
             "Signal dropped (insufficient edge)",
@@ -342,10 +354,24 @@ async def _analyze_and_bet(
             edge=round(sig.edge, 4),
             min_edge=settings.min_edge,
         )
-        return
+        return None
 
-    # Insert signal — use savepoint so a UniqueViolation doesn't poison the outer transaction
+    return (abs(sig.edge), strategy, result)
+
+
+async def _place_signal_bet(
+    db: AsyncSession,
+    market: Market,
+    strategy: Strategy,
+    gm: Any,
+    analysis_result: Any,
+    forecast: Any,
+    cycle_log: CycleLog,
+) -> None:
+    """Persist signal and place bet for the best-edge signal on this market."""
     from sqlalchemy.exc import IntegrityError
+
+    sig = analysis_result.signal
 
     signal = Signal(
         market_id=market.id,
@@ -358,14 +384,12 @@ async def _analyze_and_bet(
         reasoning=sig.reasoning,
         forecast_data=forecast.model_dump(),
         forecast_source=forecast.data_source,
-        llm_model=result.llm_model,
-        tokens_used=result.tokens_used,
+        llm_model=analysis_result.llm_model,
+        tokens_used=analysis_result.tokens_used,
         source="live_cycle",
-        ob_spread=ob.spread if ob else None,
-        ob_depth_usd=ob.depth_usd if ob else None,
     )
     try:
-        async with db.begin_nested():  # SAVEPOINT — rolls back only this insert on conflict
+        async with db.begin_nested():
             db.add(signal)
             await db.flush()
     except IntegrityError as e:

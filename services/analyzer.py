@@ -333,7 +333,7 @@ def _verify_edge(signal: LLMSignal, yes_price: float, no_price: float) -> None:
         expected = (1 - signal.our_probability) - no_price
 
     if abs(signal.edge - expected) > 0.02:
-        logger.info("LLM edge mismatch, recomputing", reported=signal.edge, computed=expected)
+        logger.debug("LLM edge mismatch, recomputing", reported=signal.edge, computed=expected)
         signal.edge = round(expected, 4)
 
 
