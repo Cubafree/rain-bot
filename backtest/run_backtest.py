@@ -83,7 +83,10 @@ async def run_backtest(
         if hasattr(gm, 'volume') and gm.volume is not None and gm.volume < settings.min_market_volume_usd:
             results["skip_volume"] = results.get("skip_volume", 0) + 1
             continue
-        parsed = parse_market(gm.question)
+        # Anchor the year to the market's resolution date so resolved markets
+        # land on the correct *past* occurrence (not next year via today-rollover).
+        ref_date = gm.endDateIso.date() if gm.endDateIso else None
+        parsed = parse_market(gm.question, reference_date=ref_date)
         if parsed.parse_confidence < 0.8 or parsed.station is None:
             results["skip_parse"] += 1
             if results["skip_parse"] <= 5:
@@ -145,7 +148,9 @@ async def run_backtest(
 
     logger.info(f"With CLOB price: {len(with_price)}, fetching weather in parallel...")
 
-    _forecast_sem = asyncio.Semaphore(5)
+    # Open-Meteo free tier caps concurrency (HTTP 429); the weather client also
+    # enforces a global semaphore, but keep this in lockstep to avoid queueing.
+    _forecast_sem = asyncio.Semaphore(2)
 
     async def _fetch_forecast_bounded(item):
         gm, parsed, as_of_date, price, hours = item

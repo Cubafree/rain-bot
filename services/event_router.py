@@ -239,11 +239,16 @@ class ParsedMarket:
     parse_confidence: float
 
 
-def parse_market(question: str) -> ParsedMarket:
+def parse_market(question: str, reference_date: date | None = None) -> ParsedMarket:
     """Extract structured fields from a Polymarket weather question.
 
     Returns a ParsedMarket; fields are None if extraction failed.
     parse_confidence < 0.8 means the market should be skipped.
+
+    ``reference_date`` anchors the year for date strings that omit one. Live
+    trading leaves it None (anchors to today, rolling forward to the next
+    occurrence). Backtests pass the market's resolution date so a resolved
+    market about "May 30" lands on the correct *past* year, not next year.
     """
     city = _extract_city(question)
     station = CITY_STATIONS.get(city) if city else None
@@ -252,7 +257,7 @@ def parse_market(question: str) -> ParsedMarket:
     coords = (FORECAST_COORDS.get(station) or STATION_COORDS.get(station)) if station else None
 
     threshold, unit, condition = _extract_threshold(question)
-    target_date = _extract_date(question)
+    target_date = _extract_date(question, reference_date=reference_date)
 
     fields_found = sum(
         x is not None for x in [city, station, threshold, condition, target_date]
@@ -306,7 +311,7 @@ def _extract_threshold(question: str) -> tuple[float | None, str | None, str | N
     return value, unit, condition
 
 
-def _extract_date(question: str) -> date | None:
+def _extract_date(question: str, reference_date: date | None = None) -> date | None:
     m = _DATE_PATTERN.search(question)
     if not m:
         return None
@@ -317,16 +322,38 @@ def _extract_date(question: str) -> date | None:
         return None
 
     day = int(m.group("day"))
-    year = int(m.group("year")) if m.group("year") else date.today().year
 
+    if m.group("year"):
+        # Explicit year in the question — trust it verbatim.
+        try:
+            return date(int(m.group("year")), month, day)
+        except ValueError:
+            return None
+
+    if reference_date is not None:
+        # Backtest: anchor to the market's resolution date and pick the (month,
+        # day) occurrence closest to it. Handles year boundaries in *both*
+        # directions so a resolved market about "May 30" lands in the past year,
+        # not next year.
+        best: date | None = None
+        for yr in (reference_date.year - 1, reference_date.year, reference_date.year + 1):
+            try:
+                cand = date(yr, month, day)
+            except ValueError:
+                continue
+            if best is None or abs((cand - reference_date).days) < abs((best - reference_date).days):
+                best = cand
+        return best
+
+    # Live: anchor to today and roll forward to the next occurrence.
+    year = date.today().year
     try:
         parsed = date(year, month, day)
     except ValueError:
         return None
-
-    # If parsed date is in the past and no explicit year was given, try next year.
+    # If parsed date is in the past, try next year.
     # Handles Dec→Jan boundary: "January 5" parsed in December should be next year.
-    if not m.group("year") and parsed < date.today():
+    if parsed < date.today():
         try:
             parsed = date(year + 1, month, day)
         except ValueError:

@@ -9,7 +9,7 @@ import httpx
 from cachetools import TTLCache
 from loguru import logger
 from pydantic import BaseModel, ConfigDict
-from tenacity import retry, retry_if_exception, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, retry_if_exception_type, stop_after_attempt, wait_random_exponential
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
@@ -18,6 +18,12 @@ HISTORICAL_WEATHER_URL = "https://archive-api.open-meteo.com/v1/archive"
 
 _cache: TTLCache = TTLCache(maxsize=200, ttl=3600 * 6)
 _cache_lock = asyncio.Lock()
+
+# Open-Meteo free tier rejects bursts with HTTP 429 "Too many concurrent
+# requests". Bound *all* outbound calls (ensemble, forecast, historical,
+# archive, outcome) to a safe global concurrency so backtests and live cycles
+# never trip the limit.
+_OPENMETEO_SEM = asyncio.Semaphore(2)
 
 
 class WeatherSummary(BaseModel):
@@ -52,12 +58,15 @@ def _is_retryable_weather(exc: BaseException) -> bool:
 
 @retry(
     retry=retry_if_exception(_is_retryable_weather),
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=2, min=4, max=60),
+    stop=stop_after_attempt(5),
+    wait=wait_random_exponential(multiplier=2, max=60),
     reraise=True,
 )
 async def _fetch(client: httpx.AsyncClient, url: str, params: dict) -> dict:
-    resp = await client.get(url, params=params, timeout=30)
+    # Hold the global concurrency slot only for the network round-trip; release
+    # it while tenacity backs off so retries don't keep the pipe saturated.
+    async with _OPENMETEO_SEM:
+        resp = await client.get(url, params=params, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
@@ -207,8 +216,12 @@ async def get_historical_forecast(
 
     summary = _build_summary(data, station, target_date, threshold, threshold_unit, hours_ahead_override)
 
-    if used_era5 and hours_ahead_override is not None:
-        summary = _add_forecast_noise(summary, hours_ahead_override)
+    # Both sources leak hindsight: the API ignores as_of_date, so a past target
+    # date returns near-truth. When a lead time is known (backtest), degrade with
+    # lead-time-scaled noise so the forecast reflects real as-of-date uncertainty.
+    if hours_ahead_override is not None:
+        label = "era5_with_noise" if used_era5 else "gfs_forecast_noised"
+        summary = _add_forecast_noise(summary, hours_ahead_override, label=label)
     elif used_era5:
         summary = summary.model_copy(update={"data_source": "era5_fallback_raw"})
 
@@ -263,8 +276,16 @@ async def get_actual_outcome(
         return "YES" if actual_max < threshold_f else "NO"
 
 
-def _add_forecast_noise(summary: WeatherSummary, hours_ahead: float) -> WeatherSummary:
-    """Add realistic GFS forecast uncertainty to ERA5 actuals for honest backtesting."""
+def _add_forecast_noise(
+    summary: WeatherSummary, hours_ahead: float, label: str = "era5_with_noise"
+) -> WeatherSummary:
+    """Add realistic GFS forecast uncertainty to a leaked actual/hindsight value.
+
+    Used in backtesting to degrade two hindsight-leaking sources — ERA5 actuals
+    and the Historical Forecast API's best archived run for a past date — into
+    something resembling the noisier forecast a trader would actually have had
+    at ``hours_ahead`` lead time.
+    """
     if hours_ahead <= 12:
         sigma_f = 1.5
     elif hours_ahead <= 24:
@@ -298,7 +319,7 @@ def _add_forecast_noise(summary: WeatherSummary, hours_ahead: float) -> WeatherS
         "p90_max_f": p90,
         "pct_above_threshold": pct_above,
         "pct_below_threshold": pct_below,
-        "data_source": "era5_with_noise",
+        "data_source": label,
     })
 
 

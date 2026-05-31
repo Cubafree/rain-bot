@@ -156,6 +156,30 @@ async def analyze(
 
     Pass ``model`` to override the default (e.g. use a faster model for backtesting).
     """
+    # Price-sanity guard — a missing/zero/one price is not a tradeable quote.
+    # Without this, edge = our_probability - yes_price inflates to ~0.99 when the
+    # market price comes back as 0, fabricating a max-size bet on garbage data.
+    if (
+        yes_price is None
+        or no_price is None
+        or yes_price <= 0.0
+        or yes_price >= 1.0
+        or no_price <= 0.0
+        or no_price >= 1.0
+    ):
+        logger.debug(
+            "Analysis skipped — non-tradeable price",
+            question=question[:60],
+            yes_price=yes_price,
+            no_price=no_price,
+        )
+        return AnalysisResult(
+            signal=None,
+            llm_model=model or settings.openrouter_model,
+            tokens_used=0,
+            raw_response="non_tradeable_price",
+        )
+
     # Model agreement filter — skip LLM if GFS and ECMWF disagree too much
     delta = forecast.model_agreement_delta_f
     if delta is not None and delta > settings.max_model_agreement_delta_f:

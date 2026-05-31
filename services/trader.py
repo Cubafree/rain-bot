@@ -12,6 +12,17 @@ from db.models import Bet, Market, Signal, Strategy
 _position_lock = asyncio.Lock()
 
 
+_PRICE_MIN = 0.02
+_PRICE_MAX = 0.98
+
+
+def _is_sane_price(price: float | None) -> bool:
+    """Return True if price is a plausible Polymarket probability (not zero, not extreme)."""
+    if price is None:
+        return False
+    return _PRICE_MIN <= price <= _PRICE_MAX
+
+
 async def place_bet(
     db: AsyncSession,
     signal: Signal,
@@ -26,6 +37,20 @@ async def place_bet(
         return None
 
     entry_price = yes_price if signal.direction == "YES" else no_price
+
+    # Reject bets when the market price is missing, zero, or at extremes.
+    # A price of 0 or 1 inflates edge artificially (edge ≈ our_probability − 0 ≈ 0.99).
+    if not _is_sane_price(entry_price):
+        logger.warning(
+            "Bet rejected — entry price outside sane band",
+            market_id=market.id,
+            direction=signal.direction,
+            entry_price=entry_price,
+            price_min=_PRICE_MIN,
+            price_max=_PRICE_MAX,
+        )
+        return None
+
     amount = _calculate_bet_size(
         edge=float(signal.edge),
         probability=float(signal.our_probability),

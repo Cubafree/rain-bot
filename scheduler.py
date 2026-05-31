@@ -186,9 +186,14 @@ async def _process_market(
         logger.debug("Market skipped (volume too low)", question=gm.question[:80], volume=gm.volume)
         return
 
-    # Skip near-resolved markets — price at extremes means market is essentially done
+    # Skip markets with missing or invalid prices — a zero price inflates edge artificially.
+    # Also skip near-resolved markets (price at extremes means essentially done).
     yes_p = getattr(gm, 'yes_price', None)
-    if yes_p is not None and (yes_p < 0.04 or yes_p > 0.96):
+    no_p = getattr(gm, 'no_price', None)
+    if yes_p is None or no_p is None or yes_p <= 0.0 or no_p <= 0.0:
+        logger.debug("Market skipped (missing/zero price)", question=gm.question[:80], yes_price=yes_p, no_price=no_p)
+        return
+    if yes_p < 0.04 or yes_p > 0.96:
         logger.debug("Market skipped (price near resolution)", question=gm.question[:80], yes_price=yes_p)
         return
 
