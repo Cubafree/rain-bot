@@ -158,13 +158,19 @@ async def get_paper_balance(db: AsyncSession) -> float:
 
 def _calculate_bet_size(edge: float, probability: float) -> float:
     """Fractional Kelly criterion bet sizing."""
-    if edge <= 0 or probability <= 0 or probability >= 1:
+    if edge <= 0:
         return 0.0
+
+    # Clamp probability away from the 0/1 extremes before Kelly.
+    # Raw ensemble pct_above saturates at exactly 0.0 / 1.0 when every member
+    # agrees (e.g. all 31 GFS members above threshold). That makes the Kelly
+    # denominator (1 - p) collapse to 0, so the old guard `probability >= 1`
+    # returned 0 and SILENTLY DISCARDED our highest-conviction signals — the
+    # exact ones the ensemble-bypass logic is meant to surface. Treat extreme
+    # consensus as 0.98 confidence rather than literal certainty.
+    probability = min(max(probability, _PRICE_MIN), _PRICE_MAX)
 
     denom = 1 - probability
-    if denom <= 0:
-        return 0.0
-
     kelly_full = edge / denom
     bet = settings.kelly_fraction * kelly_full * settings.paper_starting_balance_usd
     bet = max(0.5, min(bet, settings.max_bet_usd))
