@@ -51,6 +51,19 @@ async def place_bet(
         )
         return None
 
+    # Refuse extreme longshots. When the market prices an outcome below this floor
+    # but our forecast claims it's near-certain, we are almost always wrong — the
+    # ensemble underestimates tail uncertainty. Live data: entry_price<0.10 won 0/34.
+    if entry_price < settings.min_entry_price:
+        logger.info(
+            "Bet rejected — entry price below longshot floor",
+            market_id=market.id,
+            direction=signal.direction,
+            entry_price=entry_price,
+            min_entry_price=settings.min_entry_price,
+        )
+        return None
+
     amount = _calculate_bet_size(
         edge=float(signal.edge),
         probability=float(signal.our_probability),

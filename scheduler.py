@@ -268,6 +268,16 @@ async def _process_market(
         })
         return
 
+    # A forecast with no data_source means the fetch degraded silently — don't bet on it.
+    # Live data: forecast_source=None bets won 0/4 (-$20).
+    if not getattr(forecast, "data_source", None):
+        cycle_log.errors.append({
+            "stage": "weather_fetch",
+            "market_id": market.id,
+            "error": "forecast missing data_source",
+        })
+        return
+
     ob = None
     if hasattr(gm, 'clobTokenIds') and gm.clobTokenIds:
         ob = await polymarket.get_order_book(gm.clobTokenIds[0])
@@ -358,6 +368,18 @@ async def _get_signal(
             strategy=strategy.code,
             edge=round(sig.edge, 4),
             min_edge=settings.min_edge,
+        )
+        return None
+    # Cap claimed edge — anything this large is almost always spurious overconfidence
+    # from the uncalibrated ensemble (pct_above saturating at 0/1), not a real opportunity.
+    # Live data: |edge|>=0.70 won only 7% (4/57, -$194).
+    if abs(sig.edge) >= settings.max_edge:
+        logger.debug(
+            "Signal dropped (edge too large — likely overconfident)",
+            question=market.question[:60],
+            strategy=strategy.code,
+            edge=round(sig.edge, 4),
+            max_edge=settings.max_edge,
         )
         return None
 

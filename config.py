@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     trading_mode: Literal["paper", "live"] = "paper"
     max_bet_usd: float = Field(5.0, ge=0.1, le=100.0)
     min_edge: float = Field(0.08, ge=0.01, le=0.50)
+    # Max claimed edge — anything above this is almost always spurious overconfidence
+    # (uncalibrated ensemble pct_above saturating at 0/1). Live data: |edge|>=0.70 won
+    # only 7% (4/57, -$194). Drop them.
+    max_edge: float = Field(0.70, ge=0.10, le=1.0)
+    # Min entry price — refuse extreme longshots. Live data: entry_price<0.10 won 0/34 (-$170).
+    min_entry_price: float = Field(0.10, ge=0.0, le=0.50)
     max_ob_spread: float = Field(0.15, ge=0.0, le=1.0)
     min_confidence: Literal["high", "medium", "low"] = "high"
     paper_starting_balance_usd: float = Field(10000.0, ge=100.0)
