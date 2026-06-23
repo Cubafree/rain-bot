@@ -1,21 +1,28 @@
-"""Compute station forecast bias from Visual Crossing Historical Forecast API.
+"""Compute station forecast bias from the bot's own forecasts vs NASA POWER actuals.
 
-One-time calibration script. Requires VC_API_KEY env var (free tier: 1000 records/day).
+This is the leak-free way to calibrate `station_bias`: it compares the mean_max_f
+the bot actually predicted (stored in signals.forecast_data) against the observed
+daily max from NASA POWER (power.larc.nasa.gov) for the same station and date.
+NASA POWER needs no API key, so this replaces the old Visual Crossing flow.
+
+    bias_f[station, month] = mean( predicted_mean_max_f − actual_max_f )
+
+`_apply_bias` later SUBTRACTS bias_f, so a positive bias (forecast runs hot) is
+corrected downward. Only past target dates are used (NASA POWER has latency).
 
 Usage:
-    python scripts/compute_bias.py --stations KLGA KJFK KORD
-    python scripts/compute_bias.py --stations all --months 1-12
-    python scripts/compute_bias.py --stations KLGA --months 6 7 8
+    python scripts/compute_bias.py                       # all stations, all months
+    python scripts/compute_bias.py --stations KLGA KJFK  # specific stations
+    python scripts/compute_bias.py --min-samples 5       # require >=5 pairs/month
 """
 import argparse
 import asyncio
-import os
 import sys
-from datetime import date, timedelta
+from collections import defaultdict
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
-import httpx
 import sqlalchemy as sa
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -24,119 +31,88 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from db.models import StationBias
+from db.models import Market, Signal, StationBias
 from db.session import db_session
-from services.event_router import CITY_STATIONS, STATION_COORDS
-
-VC_BASE = "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline"
-# Free tier: forecast re-analysis going back up to ~5 years
-LOOKBACK_YEARS = 2
+from services import nasa_power
+from services.event_router import FORECAST_COORDS, STATION_COORDS
 
 
-def _all_stations() -> list[str]:
-    """Return unique station codes from the event router."""
-    return sorted(set(CITY_STATIONS.values()))
+def _coords(station: str) -> tuple[float, float] | None:
+    """Coords the live forecast uses: FORECAST_COORDS override, else airport."""
+    return FORECAST_COORDS.get(station) or STATION_COORDS.get(station)
 
 
-def _parse_months(months_arg: list[str]) -> list[int]:
-    """Accept '1-12' range or individual month numbers."""
-    result: list[int] = []
-    for token in months_arg:
-        if "-" in token:
-            start, end = token.split("-", 1)
-            result.extend(range(int(start), int(end) + 1))
-        else:
-            result.append(int(token))
-    return sorted(set(result))
+async def _load_forecast_pairs(
+    stations: list[str] | None,
+) -> dict[str, list[tuple[date, float]]]:
+    """Return {station: [(target_date, predicted_mean_max_f), ...]} from past markets."""
+    today = date.today()
+    by_station: dict[str, list[tuple[date, float]]] = defaultdict(list)
 
+    async with db_session() as db:
+        stmt = (
+            select(Market.weather_station, Market.target_date, Signal.forecast_data)
+            .join(Signal, Signal.market_id == Market.id)
+            .where(
+                Market.weather_station.isnot(None),
+                Market.target_date.isnot(None),
+                Market.target_date < today,
+                Signal.forecast_data.isnot(None),
+            )
+        )
+        if stations:
+            stmt = stmt.where(Market.weather_station.in_(stations))
+        rows = (await db.execute(stmt)).all()
 
-async def _fetch_vc_month(
-    client: httpx.AsyncClient,
-    lat: float,
-    lon: float,
-    year: int,
-    month: int,
-    api_key: str,
-) -> list[tuple[float, float]]:
-    """Fetch (forecast_tempmax, actual_tempmax) pairs for one station/month/year.
+    # Average predicted mean_max per (station, date) to dedupe multiple signals.
+    acc: dict[tuple[str, date], list[float]] = defaultdict(list)
+    for station, target_date, fdata in rows:
+        if not isinstance(fdata, dict):
+            continue
+        pred = fdata.get("mean_max_f")
+        if pred is None:
+            continue
+        acc[(station, target_date)].append(float(pred))
 
-    Visual Crossing Historical Forecast: forecastBasisDay=-1 means the forecast
-    was issued the day before the observation date.
-    """
-    start = date(year, month, 1)
-    # last day of month
-    if month == 12:
-        end = date(year, 12, 31)
-    else:
-        end = date(year, month + 1, 1) - timedelta(days=1)
-
-    url = f"{VC_BASE}/{lat},{lon}/{start.isoformat()}/{end.isoformat()}"
-    params = {
-        "unitGroup": "us",
-        "elements": "datetime,tempmax",
-        "include": "fcst,obs",
-        "forecastBasisDay": "-1",
-        "key": api_key,
-        "contentType": "json",
-    }
-    try:
-        resp = await client.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        logger.warning("VC API failed", lat=lat, lon=lon, year=year, month=month, error=str(e))
-        return []
-
-    pairs: list[tuple[float, float]] = []
-    for day in data.get("days", []):
-        # VC returns forecast and observed in the same day record when include=fcst,obs
-        # The 'tempmax' is actual observation; forecast is in 'forecastData' dict
-        actual = day.get("tempmax")
-        # When forecastBasisDay=-1, the 'source' field distinguishes; alternatively,
-        # VC returns a separate 'forecastData' sub-object. We use 'forecastTempmax' if present.
-        forecast = day.get("forecastTempmax") or day.get("tempmax")
-        if actual is not None and forecast is not None:
-            pairs.append((float(forecast), float(actual)))
-
-    return pairs
+    for (station, target_date), preds in acc.items():
+        by_station[station].append((target_date, sum(preds) / len(preds)))
+    return by_station
 
 
 async def compute_bias_for_station(
     station: str,
-    months: list[int],
-    api_key: str,
+    pairs: list[tuple[date, float]],
+    min_samples: int,
 ) -> dict[int, tuple[float, float, int]]:
-    """Return {month: (bias_f, rmse_f, count)} for the given station."""
-    coords = STATION_COORDS.get(station)
+    """Return {month: (bias_f, rmse_f, count)} pairing forecasts with NASA POWER actuals."""
+    coords = _coords(station)
     if coords is None:
-        logger.error("No coordinates for station", station=station)
+        logger.warning("No coordinates for station — skipping", station=station)
+        return {}
+    lat, lon = coords
+
+    dates = [d for d, _ in pairs]
+    actuals = await nasa_power.get_actual_max_range_f(lat, lon, min(dates), max(dates))
+    if not actuals:
+        logger.warning("NASA POWER returned no actuals", station=station)
         return {}
 
-    lat, lon = coords
-    today = date.today()
-    years = [today.year - y for y in range(1, LOOKBACK_YEARS + 1)]
-
-    # Accumulate errors per month
-    month_errors: dict[int, list[float]] = {m: [] for m in months}
-
-    async with httpx.AsyncClient() as client:
-        for year in years:
-            for month in months:
-                pairs = await _fetch_vc_month(client, lat, lon, year, month, api_key)
-                for fcst, obs in pairs:
-                    month_errors[month].append(fcst - obs)
-                await asyncio.sleep(0.5)  # stay within free tier rate limits
+    month_errors: dict[int, list[float]] = defaultdict(list)
+    for target_date, predicted in pairs:
+        actual = actuals.get(target_date)
+        if actual is None:
+            continue
+        month_errors[target_date.month].append(predicted - actual)
 
     results: dict[int, tuple[float, float, int]] = {}
     for month, errors in month_errors.items():
-        if not errors:
-            continue
         n = len(errors)
+        if n < min_samples:
+            continue
         mean_err = sum(errors) / n
         rmse = (sum(e * e for e in errors) / n) ** 0.5
         results[month] = (round(mean_err, 2), round(rmse, 2), n)
-        logger.info("Bias computed", station=station, month=month, bias_f=mean_err, rmse_f=rmse, n=n)
-
+        logger.info("Bias computed", station=station, month=month, bias_f=round(mean_err, 2), rmse_f=round(rmse, 2), n=n)
     return results
 
 
@@ -151,7 +127,7 @@ async def upsert_bias(station: str, month: int, bias_f: float, rmse_f: float, co
                 bias_f=Decimal(str(bias_f)),
                 rmse_f=Decimal(str(rmse_f)),
                 sample_count=count,
-                source="visual_crossing",
+                source="nasa_power",
             )
             .on_conflict_do_update(
                 index_elements=["station", "month"],
@@ -159,7 +135,7 @@ async def upsert_bias(station: str, month: int, bias_f: float, rmse_f: float, co
                     "bias_f": Decimal(str(bias_f)),
                     "rmse_f": Decimal(str(rmse_f)),
                     "sample_count": count,
-                    "source": "visual_crossing",
+                    "source": "nasa_power",
                     "updated_at": sa.text("now()"),
                 },
             )
@@ -167,38 +143,36 @@ async def upsert_bias(station: str, month: int, bias_f: float, rmse_f: float, co
         await db.execute(stmt)
 
 
-async def main(stations: list[str], months: list[int], api_key: str) -> None:
-    logger.info("Starting bias computation", stations=stations, months=months)
-    for station in stations:
-        bias_map = await compute_bias_for_station(station, months, api_key)
+async def main(stations: list[str] | None, min_samples: int) -> None:
+    logger.info("Loading the bot's past forecasts", stations=stations or "all")
+    by_station = await _load_forecast_pairs(stations)
+    if not by_station:
+        logger.warning("No past forecasts found in signals — nothing to calibrate")
+        return
+
+    total = 0
+    for station, pairs in sorted(by_station.items()):
+        bias_map = await compute_bias_for_station(station, pairs, min_samples)
         for month, (bias_f, rmse_f, count) in bias_map.items():
             await upsert_bias(station, month, bias_f, rmse_f, count)
-            logger.info("Upserted bias", station=station, month=month, bias_f=bias_f, rmse_f=rmse_f, n=count)
-    logger.info("Bias computation complete")
+            total += 1
+    logger.info("Bias computation complete", rows_upserted=total)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Compute station forecast bias from Visual Crossing")
+    parser = argparse.ArgumentParser(description="Calibrate station_bias from bot forecasts vs NASA POWER")
     parser.add_argument(
         "--stations",
         nargs="+",
-        required=True,
-        help='Station codes (e.g. KLGA KJFK) or "all" for all known stations',
+        default=None,
+        help="Station codes (e.g. KLGA KJFK). Default: all stations seen in signals.",
     )
     parser.add_argument(
-        "--months",
-        nargs="+",
-        default=["1-12"],
-        help="Month numbers or ranges, e.g. 6 7 8 or 1-12 (default: all)",
+        "--min-samples",
+        type=int,
+        default=3,
+        help="Minimum forecast/actual pairs required per month (default: 3)",
     )
     args = parser.parse_args()
 
-    api_key = os.environ.get("VC_API_KEY") or os.environ.get("VISUALCROSSING_API_KEY")
-    if not api_key:
-        logger.error("VC_API_KEY environment variable not set")
-        sys.exit(1)
-
-    station_list = _all_stations() if args.stations == ["all"] else args.stations
-    month_list = _parse_months(args.months)
-
-    asyncio.run(main(station_list, month_list, api_key))
+    asyncio.run(main(args.stations, args.min_samples))

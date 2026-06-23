@@ -16,6 +16,14 @@ ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
 HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 HISTORICAL_WEATHER_URL = "https://archive-api.open-meteo.com/v1/archive"
 
+# Deterministic NWP models from independent national met centres, used to build a
+# multi-model consensus alongside the GFS ensemble. Each returns a daily
+# temperature_2m_max suffixed column (temperature_2m_max_<model>) when requested
+# together. ecmwf_ifs04 is deprecated (returns null) — use ecmwf_ifs025.
+CONSENSUS_MODELS = ("ecmwf_ifs025", "icon_seamless", "gem_global", "jma_seamless")
+# Floor on per-source sigma so a near-degenerate spread never blows up the z-score.
+_MIN_SIGMA_F = 0.5
+
 _cache: TTLCache = TTLCache(maxsize=200, ttl=3600 * 6)
 _cache_lock = asyncio.Lock()
 
@@ -44,8 +52,12 @@ class WeatherSummary(BaseModel):
     # ECMWF blend fields (populated by get_forecast when ECMWF call succeeds)
     ecmwf_mean_max_f: float | None = None
     model_agreement_delta_f: float | None = None
+    # Multi-model consensus fields (populated by get_forecast)
+    model_spread_f: float | None = None       # stddev of per-model mean_max (inter-model disagreement)
+    consensus_model_count: int = 1            # number of independent models in the consensus
+    effective_sigma_f: float | None = None    # combined uncertainty driving pct_above
     # Provenance for backtest transparency
-    data_source: str = "gfs_forecast"  # "gfs_forecast" | "era5_with_noise" | "era5_fallback_raw"
+    data_source: str = "gfs_forecast"  # "gfs_forecast" | "gfs_ecmwf_consensus" | "era5_with_noise" | "era5_fallback_raw"
 
 
 def _is_retryable_weather(exc: BaseException) -> bool:
@@ -80,7 +92,10 @@ async def get_forecast(
     threshold_unit: str = "F",
     bias_f: float = 0.0,
 ) -> WeatherSummary | None:
-    cache_key = f"fc:{station}:{target_date.isoformat()}"
+    # Threshold MUST be in the cache key: pct_above depends on it, and the same
+    # station+date hosts multiple markets at different thresholds. Omitting it
+    # returned the first threshold's probability for every market.
+    cache_key = f"fc:{station}:{target_date.isoformat()}:{threshold}:{threshold_unit}"
     async with _cache_lock:
         if cache_key in _cache:
             return _cache[cache_key]
@@ -97,8 +112,9 @@ async def get_forecast(
         "end_date": target_date.isoformat(),
         "models": "gfs025",
     }
-    # ECMWF deterministic — daily, kept for model agreement delta only
-    ecmwf_params = {
+    # Deterministic consensus panel — ECMWF + ICON + GEM + JMA in one request.
+    # Returns one temperature_2m_max_<model> column per model.
+    consensus_params = {
         "latitude": latitude,
         "longitude": longitude,
         "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum",
@@ -107,13 +123,13 @@ async def get_forecast(
         "timezone": "UTC",
         "start_date": target_date.isoformat(),
         "end_date": target_date.isoformat(),
-        "models": "ecmwf_ifs04",
+        "models": ",".join(CONSENSUS_MODELS),
     }
 
     async with httpx.AsyncClient() as client:
         gfs_task = asyncio.create_task(_fetch(client, ENSEMBLE_URL, ensemble_params))
-        ecmwf_task = asyncio.create_task(_fetch(client, FORECAST_URL, ecmwf_params))
-        gfs_data, ecmwf_data = await asyncio.gather(gfs_task, ecmwf_task, return_exceptions=True)
+        cons_task = asyncio.create_task(_fetch(client, FORECAST_URL, consensus_params))
+        gfs_data, cons_data = await asyncio.gather(gfs_task, cons_task, return_exceptions=True)
 
     if isinstance(gfs_data, Exception):
         logger.error(f"GFS ensemble forecast failed: {gfs_data}", station=station)
@@ -121,19 +137,18 @@ async def get_forecast(
 
     summary = _build_summary_from_ensemble(gfs_data, station, target_date, threshold, threshold_unit)
 
-    # ECMWF model agreement delta (blend GFS ensemble mean 55% / ECMWF det. 45%)
-    if not isinstance(ecmwf_data, Exception):
-        ecmwf_summary = _build_summary(ecmwf_data, station, target_date, threshold, threshold_unit)
-        if ecmwf_summary.mean_max_f is not None and summary.mean_max_f is not None:
-            blended_max = round(summary.mean_max_f * 0.55 + ecmwf_summary.mean_max_f * 0.45, 1)
-            delta = round(abs(summary.mean_max_f - ecmwf_summary.mean_max_f), 1)
-            summary = summary.model_copy(update={
-                "mean_max_f": blended_max,
-                "ecmwf_mean_max_f": ecmwf_summary.mean_max_f,
-                "model_agreement_delta_f": delta,
-            })
+    # Multi-model consensus: blend the GFS ensemble mean with the deterministic
+    # panel and widen uncertainty by inter-model disagreement. This both averages
+    # away single-model error AND fixes the saturation problem — the empirical
+    # member-count pct_above hits exactly 0/1 when all members agree, which made
+    # the bot wildly overconfident on longshots. The parametric Normal here never
+    # reaches 0/1 and pulls toward 0.5 as models disagree.
+    if not isinstance(cons_data, Exception):
+        model_maxes = _extract_consensus_maxes(cons_data, target_date)
+        if model_maxes:
+            summary = _apply_multimodel_consensus(summary, model_maxes, threshold, threshold_unit)
     else:
-        logger.warning(f"ECMWF forecast failed: {ecmwf_data}", station=station)
+        logger.warning(f"Consensus panel fetch failed: {cons_data}", station=station)
 
     if bias_f != 0.0:
         summary = _apply_bias(summary, bias_f)
@@ -160,7 +175,7 @@ async def get_historical_forecast(
     Falls back to the ERA5 Archive API (actual observations) when that endpoint fails
     — which it will on the free Open-Meteo tier.
     """
-    cache_key = f"hf:{station}:{target_date.isoformat()}:{as_of_date.isoformat()}"
+    cache_key = f"hf:{station}:{target_date.isoformat()}:{as_of_date.isoformat()}:{threshold}:{threshold_unit}"
     async with _cache_lock:
         if cache_key in _cache:
             return _cache[cache_key]
@@ -274,6 +289,89 @@ async def get_actual_outcome(
         return "YES" if actual_max > threshold_f else "NO"
     else:
         return "YES" if actual_max < threshold_f else "NO"
+
+
+def _extract_consensus_maxes(data: dict, target_date: date) -> list[float]:
+    """Pull each deterministic model's daily max for target_date from a multi-model response.
+
+    Open-Meteo suffixes each model's column as ``temperature_2m_max_<model>`` when
+    several models are requested together. Missing/null models are skipped.
+    """
+    daily = data.get("daily", {})
+    times = daily.get("time", [])
+    try:
+        idx = times.index(target_date.isoformat())
+    except ValueError:
+        idx = 0 if times else None
+    if idx is None:
+        return []
+
+    maxes: list[float] = []
+    for key, vals in daily.items():
+        if not key.startswith("temperature_2m_max_"):
+            continue
+        if idx < len(vals) and vals[idx] is not None:
+            maxes.append(float(vals[idx]))
+    return maxes
+
+
+def _apply_multimodel_consensus(
+    summary: WeatherSummary,
+    model_maxes: list[float],
+    threshold: float | None,
+    threshold_unit: str,
+) -> WeatherSummary:
+    """Blend GFS ensemble mean with the deterministic panel and recompute pct_above.
+
+    Combines intra-model uncertainty (GFS ensemble spread, from p10/p90) with
+    inter-model disagreement (stddev of per-model means) into a single effective
+    sigma, then derives pct_above parametrically from Normal(consensus_mean,
+    effective_sigma). Replaces the empirical member-count probability that
+    saturated at 0/1.
+    """
+    import statistics
+
+    if summary.mean_max_f is None:
+        return summary
+
+    # GFS ensemble mean is one "model" in the consensus alongside the panel.
+    means = [summary.mean_max_f] + model_maxes
+    consensus_mean = round(statistics.fmean(means), 1)
+    model_spread = round(statistics.pstdev(means), 2) if len(means) >= 2 else 0.0
+
+    # Intra-ensemble sigma recovered from the GFS p10/p90 (±1.28σ ⇒ 80% band).
+    if summary.p10_max_f is not None and summary.p90_max_f is not None and summary.p90_max_f > summary.p10_max_f:
+        ensemble_sigma = (summary.p90_max_f - summary.p10_max_f) / (2 * 1.28)
+    else:
+        ensemble_sigma = _MIN_SIGMA_F
+    ensemble_sigma = max(ensemble_sigma, _MIN_SIGMA_F)
+
+    effective_sigma = round(math.sqrt(ensemble_sigma ** 2 + model_spread ** 2), 2)
+
+    threshold_f = summary.threshold  # already converted to F in the GFS summary
+    if threshold_f is None and threshold is not None:
+        threshold_f = threshold * 9 / 5 + 32 if threshold_unit == "C" else threshold
+
+    pct_above = summary.pct_above_threshold
+    pct_below = summary.pct_below_threshold
+    if threshold_f is not None:
+        z = (consensus_mean - threshold_f) / effective_sigma
+        pct_above = round(0.5 * (1 + math.erf(z / math.sqrt(2))), 3)
+        pct_below = round(1.0 - pct_above, 3)
+
+    return summary.model_copy(update={
+        "mean_max_f": consensus_mean,
+        "p10_max_f": round(consensus_mean - 1.28 * effective_sigma, 1),
+        "p90_max_f": round(consensus_mean + 1.28 * effective_sigma, 1),
+        "pct_above_threshold": pct_above,
+        "pct_below_threshold": pct_below,
+        "ecmwf_mean_max_f": model_maxes[0] if model_maxes else None,
+        "model_agreement_delta_f": model_spread,
+        "model_spread_f": model_spread,
+        "consensus_model_count": len(means),
+        "effective_sigma_f": effective_sigma,
+        "data_source": "gfs_ecmwf_consensus",
+    })
 
 
 def _add_forecast_noise(

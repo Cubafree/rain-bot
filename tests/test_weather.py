@@ -10,18 +10,33 @@ from services.weather import (
     _build_summary,
     _add_forecast_noise,
     _apply_bias,
+    _extract_consensus_maxes,
+    _apply_multimodel_consensus,
     WeatherSummary,
+    ENSEMBLE_URL,
+    FORECAST_URL,
 )
 
 
-MOCK_RESPONSE = {
-    "latitude": 32.847,
-    "longitude": -96.852,
+# GFS ensemble (hourly) response — control + 2 members over the target day.
+ENSEMBLE_MOCK = {
+    "hourly": {
+        "time": ["2026-06-05T12:00", "2026-06-05T18:00", "2026-06-05T21:00"],
+        "temperature_2m": [90.0, 96.2, 94.0],
+        "temperature_2m_member01": [89.0, 97.0, 93.0],
+        "temperature_2m_member02": [91.0, 95.5, 95.0],
+        "precipitation": [0.0, 0.0, 0.0],
+    },
+}
+
+# Deterministic consensus panel (daily, suffixed per model).
+CONSENSUS_MOCK = {
     "daily": {
         "time": ["2026-06-05"],
-        "temperature_2m_max": [96.2, 94.8, 98.1, 95.5, 97.0],
-        "temperature_2m_min": [75.0, 74.5, 76.2, 74.8, 75.5],
-        "precipitation_sum": [0.0, 0.0, 0.0, 0.0, 0.0],
+        "temperature_2m_max_ecmwf_ifs025": [96.0],
+        "temperature_2m_max_icon_seamless": [95.5],
+        "temperature_2m_max_gem_global": [97.0],
+        "temperature_2m_max_jma_seamless": [96.5],
     },
 }
 
@@ -29,9 +44,8 @@ MOCK_RESPONSE = {
 @pytest.mark.asyncio
 @respx.mock
 async def test_get_forecast_returns_summary():
-    respx.get("https://api.open-meteo.com/v1/forecast").mock(
-        return_value=httpx.Response(200, json=MOCK_RESPONSE)
-    )
+    respx.get(ENSEMBLE_URL).mock(return_value=httpx.Response(200, json=ENSEMBLE_MOCK))
+    respx.get(FORECAST_URL).mock(return_value=httpx.Response(200, json=CONSENSUS_MOCK))
 
     result = await get_forecast(
         station="KDAL",
@@ -46,14 +60,20 @@ async def test_get_forecast_returns_summary():
     assert result.station == "KDAL"
     assert result.mean_max_f is not None
     assert result.pct_above_threshold is not None
+    # Consensus path engaged: 1 GFS ensemble mean + 4 deterministic models
+    assert result.data_source == "gfs_ecmwf_consensus"
+    assert result.consensus_model_count == 5
+    assert result.model_spread_f is not None
+    # Parametric pct_above must never saturate to exactly 0/1 for a plausible threshold
+    assert 0.0 < result.pct_above_threshold < 1.0
 
 
 @pytest.mark.asyncio
 @respx.mock
 async def test_get_forecast_handles_api_error():
-    respx.get("https://api.open-meteo.com/v1/forecast").mock(
-        return_value=httpx.Response(500)
-    )
+    # GFS ensemble is the required backbone — its failure returns None.
+    respx.get(ENSEMBLE_URL).mock(return_value=httpx.Response(500))
+    respx.get(FORECAST_URL).mock(return_value=httpx.Response(500))
 
     result = await get_forecast(
         station="KDAL",
@@ -63,6 +83,54 @@ async def test_get_forecast_handles_api_error():
     )
 
     assert result is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_forecast_survives_consensus_panel_failure():
+    # If only the deterministic panel fails, we still return the GFS-only summary.
+    respx.get(ENSEMBLE_URL).mock(return_value=httpx.Response(200, json=ENSEMBLE_MOCK))
+    respx.get(FORECAST_URL).mock(return_value=httpx.Response(500))
+
+    result = await get_forecast(
+        station="KDAL",
+        target_date=date(2026, 6, 5),
+        latitude=32.847,
+        longitude=-96.852,
+        threshold=95.0,
+        threshold_unit="F",
+    )
+
+    assert result is not None
+    assert result.data_source == "gfs_forecast"
+    assert result.consensus_model_count == 1
+
+
+def test_extract_consensus_maxes_skips_nulls():
+    data = {
+        "daily": {
+            "time": ["2026-06-04", "2026-06-05"],
+            "temperature_2m_max_ecmwf_ifs025": [80.0, 96.0],
+            "temperature_2m_max_icon_seamless": [None, 95.5],
+            "temperature_2m_max_gem_global": [81.0, None],
+        }
+    }
+    maxes = _extract_consensus_maxes(data, date(2026, 6, 5))
+    assert sorted(maxes) == [95.5, 96.0]
+
+
+def test_apply_multimodel_consensus_widens_with_disagreement():
+    base = WeatherSummary(
+        station="KDAL", target_date="2026-06-05", members=31,
+        mean_max_f=95.0, p10_max_f=93.0, p90_max_f=97.0,
+        pct_above_threshold=1.0, pct_below_threshold=0.0, threshold=95.0,
+    )
+    # Wildly disagreeing panel → larger spread → pct_above pulled toward 0.5
+    wide = _apply_multimodel_consensus(base, [85.0, 105.0], threshold=95.0, threshold_unit="F")
+    tight = _apply_multimodel_consensus(base, [94.5, 95.5], threshold=95.0, threshold_unit="F")
+    assert wide.model_spread_f > tight.model_spread_f
+    assert wide.effective_sigma_f > tight.effective_sigma_f
+    assert 0.0 < wide.pct_above_threshold < 1.0
 
 
 def test_build_summary_pct_above():
