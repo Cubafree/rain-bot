@@ -36,8 +36,9 @@ backtest/
 ```
 
 ## Key design decisions
-- **GFS ensemble**: `ensemble-api.open-meteo.com` with `models=gfs025` → 31 member columns (control + member01..30), hourly → daily max per member → real `pct_above_threshold`
-- **ECMWF blend**: deterministic ECMWF from `api.open-meteo.com` kept for model-agreement delta; mean blended 55% GFS / 45% ECMWF
+- **GFS ensemble**: `ensemble-api.open-meteo.com` with `models=gfs025` → 31 member columns (control + member01..30), hourly → daily max per member
+- **Multi-model consensus** (`get_forecast`): GFS ensemble mean blended with a deterministic panel (ECMWF `ecmwf_ifs025`, ICON `icon_seamless`, GEM `gem_global`, JMA `jma_seamless`) in one Open-Meteo call. `pct_above` is parametric: `Normal(consensus_mean, effective_sigma)` with `effective_sigma² = ensemble_sigma² + model_spread²`. Replaces the old empirical member-count `pct_above` (saturated at 0/1 → longshot overconfidence) and the dead `ecmwf_ifs04` 55/45 blend (returned null). `data_source="gfs_ecmwf_consensus"`.
+- **Forecast cache key** includes threshold+unit (not just station+date) — markets share station/day at different thresholds.
 - **LLM bypass**: skip OpenRouter when `pct_above >= llm_bypass_pct_threshold (0.85)` and `members >= 20`
 - **Session safety**: `db.begin_nested()` SAVEPOINT for signal INSERT to survive `UniqueViolation` without poisoning the outer transaction
 - **Forecast coords**: `FORECAST_COORDS` in `event_router.py` overrides airport coords for cities where the national met office reports from city centre (HK, Tokyo, Beijing, Shanghai, Bangkok, São Paulo)
@@ -53,10 +54,13 @@ backtest/
 - N+1 query in `_check_unresolved_markets` → single JOIN
 - `datetime.utcnow()` deprecation → `datetime.now(timezone.utc)`
 - GFS deterministic (1 member) → real 31-member ensemble
+- Kelly zeroed highest-conviction bets (`prob>=1` guard) → clamp prob to [0.02,0.98] (FIX7)
+- Longshot/overconfidence losses → `min_entry_price=0.10`, `max_edge=0.70` guardrails, skip null `data_source` (FIX8)
+- Single-model overconfidence (pct saturating 0/1) → multi-model parametric consensus (FIX9)
 
 ## Backlog
-- [ ] Resolution via actual weather data (currently only from Polymarket outcome prices)
-- [ ] Station bias data — `StationBias` table exists but `compute_bias.py` needs Visual Crossing key to populate
+- [ ] Resolution via actual weather data — `services/nasa_power.py` client now exists (NASA POWER actuals, no key); wire into resolver
+- [x] Station bias — `compute_bias.py` rewritten to calibrate from bot's own forecasts vs NASA POWER actuals (no key); `station_bias` populated. Re-run periodically as samples grow.
 - [ ] Strategy review — only S1 active in paper trade; need to seed S2–S6 in DB
 - [ ] Polymarket strategy research for `poly bot 2` (separate project)
 
