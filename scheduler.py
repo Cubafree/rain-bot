@@ -1,5 +1,6 @@
 """APScheduler v3 — weather cycle synced to GFS publish times."""
 import asyncio
+import random
 from datetime import datetime, timezone
 from typing import Any
 
@@ -282,10 +283,15 @@ async def _process_market(
     if hasattr(gm, 'clobTokenIds') and gm.clobTokenIds:
         ob = await polymarket.get_order_book(gm.clobTokenIds[0])
 
-    # Collect signals from all strategies, then place only the highest-edge bet per market.
-    # This prevents N correlated bets on the same outcome and conserves position slots.
+    # Collect signals from all ELIGIBLE strategies, then place only the highest-edge
+    # bet per market. Each strategy has its own entry gate (see _strategy_eligible) so
+    # it only competes on the markets it is designed for — otherwise the ensemble
+    # bypass produces a strategy-agnostic signal and S1 (first in the list) always
+    # wins the tie, which is why only S1 was ever betting.
     signals: list[tuple[float, "Strategy", Any]] = []  # (|edge|, strategy, result)
     for strategy in strategies:
+        if not _strategy_eligible(strategy, gm, market, forecast):
+            continue
         try:
             result = await _get_signal(db, market, strategy, gm, forecast, cycle_log, llm_counter, ob)
             if result is not None:
@@ -301,10 +307,55 @@ async def _process_market(
     if not signals:
         return
 
-    # Best edge wins — only one bet placed per market per cycle
-    signals.sort(key=lambda t: t[0], reverse=True)
-    abs_edge, best_strategy, best_result = signals[0]
+    # Best edge wins — only one bet placed per market per cycle. On (near-)ties,
+    # which are common because the ensemble bypass returns the same edge for every
+    # eligible strategy, pick at random among the leaders so attribution is fair
+    # instead of always crediting the first-loaded strategy (S1).
+    top_edge = max(t[0] for t in signals)
+    leaders = [t for t in signals if abs(t[0] - top_edge) < 1e-6]
+    abs_edge, best_strategy, best_result = random.choice(leaders)
     await _place_signal_bet(db, market, best_strategy, gm, best_result, forecast, cycle_log)
+
+
+def _strategy_eligible(strategy: Strategy, gm: Any, market: Market, forecast: Any) -> bool:
+    """Per-strategy entry gate. A strategy only competes on the markets it targets.
+
+    Gates are derived from each strategy's params so they can be tuned in the DB
+    without code changes. Overlap between strategies is fine — the tie-break above
+    distributes contested markets. Returns True (eligible) by default for any
+    active strategy without an explicit gate.
+    """
+    code = strategy.code
+    params = strategy.params or {}
+    yes = gm.yes_price
+    hours = forecast.hours_ahead
+    spread = forecast.model_spread_f
+
+    if code == "S1":  # Tail Hunter — only extreme-priced (longshot) markets
+        if yes is None:
+            return False
+        max_yes = float(params.get("max_yes_price", 0.15))
+        return yes <= max_yes or yes >= (1.0 - max_yes)
+
+    if code == "S2":  # Model Update Sniper — short lead time, fresh model run
+        return hours is not None and hours <= float(params.get("max_lead_hours", 36))
+
+    if code == "S3":  # Niche Geo — skip the heavily-traded major cities
+        excluded = {c.lower() for c in params.get("excluded_cities", [])}
+        return (market.city or "").lower() not in excluded
+
+    if code == "S4":  # Consensus Divergence — require tight multi-model agreement
+        return spread is not None and spread <= float(params.get("max_spread_f", 2.0))
+
+    if code == "S5":  # Time Decay — mid lead-time window
+        lo = float(params.get("min_hours_to_close", 6))
+        hi = float(params.get("max_hours_to_close", 24))
+        return hours is not None and lo <= hours <= hi
+
+    if code == "S7":  # Whale Following — driven by whale_watcher; needs a watchlist
+        return bool(params.get("watchlist"))
+
+    return True
 
 
 async def _get_signal(
