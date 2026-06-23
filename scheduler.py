@@ -437,6 +437,32 @@ async def _get_signal(
     return (abs(sig.edge), strategy, result)
 
 
+async def _city_day_exposure_full(db: AsyncSession, market: Market, strategy: Strategy) -> bool:
+    """True if this strategy already holds the max pending bets for market's city+date.
+
+    Groups by city (falling back to weather_station). Counts pending bets in the
+    current trading mode for the same grouping key and strategy, including ones
+    already added earlier in this cycle (read-your-writes within the transaction).
+    """
+    group_col = Market.city if market.city else Market.weather_station
+    group_val = market.city or market.weather_station
+    if group_val is None or market.target_date is None:
+        return False  # nothing to group on — don't block
+
+    result = await db.execute(
+        select(func.count(Bet.id))
+        .join(Market, Market.id == Bet.market_id)
+        .where(
+            Bet.mode == settings.trading_mode,
+            Bet.outcome == "pending",
+            Bet.strategy_id == strategy.id,
+            group_col == group_val,
+            Market.target_date == market.target_date,
+        )
+    )
+    return result.scalar_one() >= settings.max_bets_per_city_day
+
+
 async def _place_signal_bet(
     db: AsyncSession,
     market: Market,
@@ -450,6 +476,19 @@ async def _place_signal_bet(
     from sqlalchemy.exc import IntegrityError
 
     sig = analysis_result.signal
+
+    # Correlated-exposure cap. Threshold markets for the same city+date are driven
+    # by one forecast, so several bets are really one position at N× size. Limit how
+    # many a single strategy holds per (city, date); different strategies are exempt
+    # (we want independent per-strategy attribution).
+    if await _city_day_exposure_full(db, market, strategy):
+        logger.debug(
+            "Bet skipped — per-strategy city/day exposure cap reached",
+            city=market.city,
+            target_date=str(market.target_date),
+            strategy=strategy.code,
+        )
+        return
 
     signal = Signal(
         market_id=market.id,

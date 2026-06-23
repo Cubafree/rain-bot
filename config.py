@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     paper_starting_balance_usd: float = Field(10000.0, ge=100.0)
     kelly_fraction: float = Field(0.25, ge=0.05, le=1.0)
     max_concurrent_positions: int = Field(20, ge=1, le=50)
+    # Correlated-exposure cap: multiple threshold markets for the same city+date
+    # share one forecast, so betting several is one position at N× size. Cap how
+    # many bets a *single strategy* may hold per (city, date). Different strategies
+    # may still each take their own bet on that city/date.
+    max_bets_per_city_day: int = Field(1, ge=1, le=10)
     max_strategy_exposure_pct: float = Field(0.20, ge=0.01, le=1.0)
     max_daily_llm_cost_usd: float = Field(2.0, ge=0.0)
 
