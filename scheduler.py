@@ -250,6 +250,7 @@ async def _process_market(
         )
     ).scalar_one_or_none()
     bias_f = float(bias_row.bias_f) if bias_row else 0.0
+    rmse_f = float(bias_row.rmse_f) if bias_row else 0.0
 
     forecast = await weather.get_forecast(
         station=parsed.station,
@@ -259,6 +260,7 @@ async def _process_market(
         threshold=parsed.threshold,
         threshold_unit=parsed.unit or "F",
         bias_f=bias_f,
+        rmse_f=rmse_f,
     )
 
     if forecast is None:

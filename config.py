@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     min_market_volume_usd: float = Field(10000.0)
     max_model_agreement_delta_f: float = Field(3.0, ge=0.5, le=10.0)
     llm_bypass_pct_threshold: float = Field(0.85, ge=0.70, le=0.99)
+    # Floor on real forecast error (°F) folded into effective_sigma so pct_above
+    # is not overconfident. Live calibration showed claimed 0.92-1.0 won only 33%
+    # — effective_sigma (~2.3F) badly underestimated true error (station rmse 2-6F).
+    default_forecast_rmse_f: float = Field(3.0, ge=0.0, le=15.0)
 
     # Trading
     trading_mode: Literal["paper", "live"] = "paper"

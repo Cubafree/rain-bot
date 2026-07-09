@@ -119,6 +119,37 @@ def test_extract_consensus_maxes_skips_nulls():
     assert sorted(maxes) == [95.5, 96.0]
 
 
+def test_apply_multimodel_consensus_extra_sigma_widens_and_moderates():
+    base = WeatherSummary(
+        station="KDAL", target_date="2026-06-05", members=31,
+        mean_max_f=99.0, p10_max_f=98.0, p90_max_f=100.0,
+        pct_above_threshold=1.0, pct_below_threshold=0.0, threshold=95.0,
+    )
+    panel = [98.5, 99.5]  # tight agreement
+    no_err = _apply_multimodel_consensus(base, panel, 95.0, "F", extra_sigma_f=0.0)
+    with_err = _apply_multimodel_consensus(base, panel, 95.0, "F", extra_sigma_f=5.0)
+    # Real forecast error widens sigma and pulls an overconfident pct toward 0.5
+    assert with_err.effective_sigma_f > no_err.effective_sigma_f
+    assert with_err.pct_above_threshold < no_err.pct_above_threshold
+    assert with_err.pct_above_threshold < 1.0
+
+
+def test_apply_multimodel_consensus_extra_sigma_moderates_pct():
+    # extra_sigma_f (station forecast error) must widen effective sigma and pull
+    # pct_above toward 0.5 — the FIX12 calibration fix for overconfidence.
+    base = WeatherSummary(
+        station="KDAL", target_date="2026-06-05", members=31,
+        mean_max_f=98.0, p10_max_f=96.0, p90_max_f=100.0,
+        pct_above_threshold=1.0, pct_below_threshold=0.0, threshold=95.0,
+    )
+    tight = _apply_multimodel_consensus(base, [97.5, 98.5], threshold=95.0, threshold_unit="F", extra_sigma_f=0.0)
+    wide = _apply_multimodel_consensus(base, [97.5, 98.5], threshold=95.0, threshold_unit="F", extra_sigma_f=6.0)
+    assert wide.effective_sigma_f > tight.effective_sigma_f
+    # Mean is above threshold, so a wider sigma pulls the (high) pct_above DOWN toward 0.5
+    assert wide.pct_above_threshold < tight.pct_above_threshold
+    assert 0.5 < wide.pct_above_threshold < 1.0
+
+
 def test_apply_multimodel_consensus_widens_with_disagreement():
     base = WeatherSummary(
         station="KDAL", target_date="2026-06-05", members=31,

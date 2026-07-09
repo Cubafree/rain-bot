@@ -91,6 +91,7 @@ async def get_forecast(
     threshold: float | None = None,
     threshold_unit: str = "F",
     bias_f: float = 0.0,
+    rmse_f: float = 0.0,
 ) -> WeatherSummary | None:
     # Threshold MUST be in the cache key: pct_above depends on it, and the same
     # station+date hosts multiple markets at different thresholds. Omitting it
@@ -146,7 +147,16 @@ async def get_forecast(
     if not isinstance(cons_data, Exception):
         model_maxes = _extract_consensus_maxes(cons_data, target_date)
         if model_maxes:
-            summary = _apply_multimodel_consensus(summary, model_maxes, threshold, threshold_unit)
+            # Fold real forecast error into the spread. station rmse is error vs
+            # actuals; subtract the bias component (applied separately below) to get
+            # the residual std, then floor it so even uncalibrated stations aren't
+            # overconfident. Combined in quadrature inside the consensus.
+            from config import settings
+            resid_sq = max(rmse_f ** 2 - bias_f ** 2, 0.0)
+            extra_sigma_f = max(math.sqrt(resid_sq), settings.default_forecast_rmse_f)
+            summary = _apply_multimodel_consensus(
+                summary, model_maxes, threshold, threshold_unit, extra_sigma_f=extra_sigma_f
+            )
     else:
         logger.warning(f"Consensus panel fetch failed: {cons_data}", station=station)
 
@@ -320,14 +330,17 @@ def _apply_multimodel_consensus(
     model_maxes: list[float],
     threshold: float | None,
     threshold_unit: str,
+    extra_sigma_f: float = 0.0,
 ) -> WeatherSummary:
     """Blend GFS ensemble mean with the deterministic panel and recompute pct_above.
 
-    Combines intra-model uncertainty (GFS ensemble spread, from p10/p90) with
-    inter-model disagreement (stddev of per-model means) into a single effective
-    sigma, then derives pct_above parametrically from Normal(consensus_mean,
-    effective_sigma). Replaces the empirical member-count probability that
-    saturated at 0/1.
+    Combines three independent error sources in quadrature into one effective
+    sigma: intra-model uncertainty (GFS ensemble spread, from p10/p90),
+    inter-model disagreement (stddev of per-model means), and ``extra_sigma_f``
+    — the model's real error vs observed actuals (station rmse). Then derives
+    pct_above parametrically from Normal(consensus_mean, effective_sigma).
+    Replaces the empirical member-count probability that saturated at 0/1 and
+    was badly overconfident (claimed 0.92-1.0 won only ~33% in live data).
     """
     import statistics
 
@@ -346,7 +359,9 @@ def _apply_multimodel_consensus(
         ensemble_sigma = _MIN_SIGMA_F
     ensemble_sigma = max(ensemble_sigma, _MIN_SIGMA_F)
 
-    effective_sigma = round(math.sqrt(ensemble_sigma ** 2 + model_spread ** 2), 2)
+    effective_sigma = round(
+        math.sqrt(ensemble_sigma ** 2 + model_spread ** 2 + extra_sigma_f ** 2), 2
+    )
 
     threshold_f = summary.threshold  # already converted to F in the GFS summary
     if threshold_f is None and threshold is not None:
